@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Marketingová príručka</title>
+<meta name="description" content="Marketingová príručka pre začiatočníkov: reklamná aukcia, skóre kvality, funnel a typy kampaní, pravidlá pre konverzie a landing page. Doplnok k školeniam na ITLearning.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📈</text></svg>">
+</head>
+<body>
+
+<a class="skip" href="#obsah">Preskočiť na obsah</a>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="#top">
+      <span class="brand-mark">MP</span>
+      <span class="brand-text">Marketingová príručka</span>
+    </a>
+    <nav class="topnav" aria-label="Hlavná navigácia">
+      <a href="#aukcia">Aukcia</a>
+      <a href="#kvalita">Skóre kvality</a>
+      <a href="#funnel">Funnel</a>
+      <a href="#konverzie">Konverzie</a>
+      <a href="#landing">Landing page</a>
+      <a href="#kalkulacka">Kalkulačka</a>
+      <a class="btn btn-sm" href="#kontakt">Kontakt</a>
+    </nav>
+    <button class="menu-toggle" aria-expanded="false" aria-controls="mobilenav" aria-label="Otvoriť menu">
+      <span></span><span></span><span></span>
+    </button>
+  </div>
+  <div class="progress" aria-hidden="true"><div class="progress-bar"></div></div>
+</header>
+
+<div class="mobilenav" id="mobilenav" hidden>
+  <a href="#aukcia">Reklamná aukcia</a>
+  <a href="#kvalita">Skóre kvality</a>
+  <a href="#funnel">Funnel a typy kampaní</a>
+  <a href="#konverzie">Pravidlá pre konverzie</a>
+  <a href="#landing">Pravidlá pre landing page</a>
+  <a href="#checklist">Checklist pred spustením</a>
+  <a href="#kalkulacka">Kalkulačka</a>
+  <a href="#kontakt">Kontakt</a>
+</div>
+
+<main id="top">
+
+<section class="hero">
+  <div class="wrap hero-inner">
+    <p class="eyebrow">Doplnkové materiály ku školeniam na ITLearning</p>
+    <h1>Marketingová príručka<br><span class="grad">pre začiatočníkov</span></h1>
+    <p class="lede">Všetko podstatné, čo potrebuješ vedieť skôr, než minieš prvé euro v reklame: ako funguje aukcia, čo naozaj znamená skóre kvality, kam v lieviku patrí ktorý typ kampane a aké pravidlá platia pre konverzie a landing page.</p>
+    <div class="hero-cta">
+      <a class="btn" href="#aukcia">Začať čítať</a>
+      <a class="btn btn-ghost" href="#kontakt">Mám záujem o školenie</a>
+    </div>
+    <div class="hero-cards">
+      <a class="hcard" href="#aukcia"><span class="hcard-num">01</span><strong>Reklamná aukcia</strong><span>Ad Rank, prahy, reálna cena za klik</span></a>
+      <a class="hcard" href="#kvalita"><span class="hcard-num">02</span><strong>Skóre kvality</strong><span>3 zložky a čo s nimi robiť</span></a>
+      <a class="hcard" href="#funnel"><span class="hcard-num">03</span><strong>Funnel</strong><span>Ktorá kampaň patrí do ktorej fázy</span></a>
+      <a class="hcard" href="#konverzie"><span class="hcard-num">04</span><strong>Konverzie</strong><span>12 pravidiel merania</span></a>
+      <a class="hcard" href="#landing"><span class="hcard-num">05</span><strong>Landing page</strong><span>Pravidlá a checklist</span></a>
+      <a class="hcard" href="#kalkulacka"><span class="hcard-num">06</span><strong>Kalkulačka</strong><span>Break-even CPC, CPA a ROAS</span></a>
+    </div>
+  </div>
+</section>
+
+<div class="wrap layout" id="obsah">
+
+<aside class="sidebar" aria-label="Obsah stránky">
+  <p class="sidebar-title">Obsah</p>
+  <nav class="toc">
+    <a href="#aukcia">Reklamná aukcia</a>
+    <a href="#kvalita">Skóre kvality</a>
+    <a href="#funnel">Funnel a typy kampaní</a>
+    <a href="#konverzie">Pravidlá pre konverzie</a>
+    <a href="#landing">Pravidlá pre landing page</a>
+    <a href="#checklist">Checklist pred spustením</a>
+    <a href="#kalkulacka">Kalkulačka</a>
+    <a href="#pojmy">Slovníček pojmov</a>
+    <a href="#kontakt">Kontakt</a>
+  </nav>
+</aside>
+
+<article class="content">
+
+<!-- ================= AUKCIA ================= -->
+<section id="aukcia" class="section">
+  <p class="section-num">01</p>
+  <h2>Ako funguje reklamná aukcia</h2>
+  <p class="section-lede">Najčastejší omyl začiatočníka: „kto dá viac, je vyššie". Neplatí to. Aukcia prebehne nanovo pri <strong>každom jednom vyhľadaní</strong> a rozhoduje v nej kombinácia ponuky a kvality.</p>
+
+  <div class="formula">
+    <span class="formula-label">Ad Rank</span>
+    <p><strong>Ponuka (bid)</strong> × <strong>kvalita reklamy v aukcii</strong> + očakávaný prínos rozšírení a assetov + kontext vyhľadávania (zariadenie, lokalita, čas, zámer dopytu)</p>
+  </div>
+
+  <h3>Čo to znamená v praxi</h3>
+  <p>Reklamu s vyššou kvalitou vie systém umiestniť vyššie aj pri nižšej ponuke — a ešte za ňu zaplatíš menej. Pozri si modelový príklad troch inzerentov, ktorí súťažia o rovnaké kľúčové slovo:</p>
+
+  <div class="table-scroll">
+  <table>
+    <thead>
+      <tr><th>Inzerent</th><th>Max. CPC</th><th>Kvalita (1–10)</th><th>Ad Rank</th><th>Pozícia</th><th>Reálne zaplatí</th></tr>
+    </thead>
+    <tbody>
+      <tr class="row-good"><td><strong>A</strong></td><td>1,00 €</td><td>10</td><td>10,0</td><td>1.</td><td><strong>0,81 €</strong></td></tr>
+      <tr><td><strong>B</strong></td><td>2,00 €</td><td>4</td><td>8,0</td><td>2.</td><td>1,14 €</td></tr>
+      <tr class="row-bad"><td><strong>C</strong></td><td>1,50 €</td><td>3</td><td>4,5</td><td>3.</td><td>~1,50 € (na hrane)</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="formula alt">
+    <span class="formula-label">Reálna cena za klik</span>
+    <p>CPC ≈ ( Ad Rank inzerenta pod tebou ÷ tvoja kvalita ) + 0,01 €</p>
+    <p class="formula-note">Inzerent A: 8,0 ÷ 10 + 0,01 = <strong>0,81 €</strong>. Inzerent B zaplatil o 40 % viac za horšiu pozíciu — lebo mu chýbala kvalita.</p>
+  </div>
+
+  <h3>Prahy Ad Rank (Ad Rank thresholds)</h3>
+  <p>Systém má minimálne latky, ktoré musíš prekročiť, aby sa reklama vôbec zobrazila — a ďalšie, vyššie, aby sa zobrazila nad organickými výsledkami. Prah nie je fixný: mení sa podľa zámeru dopytu, konkurencie, zariadenia aj kvality tvojej reklamy. <strong>Slabá kvalita = vyšší prah = platíš viac alebo sa nezobrazuješ vôbec.</strong></p>
+
+  <div class="callout tip">
+    <strong>3 ponaučenia z aukcie</strong>
+    <ol>
+      <li>Zvýšenie ponuky je najdrahší spôsob, ako sa dostať vyššie. Zlepšenie relevancie je najlacnejší.</li>
+      <li>Rozšírenia a assety (odkazy na podstránky, popisy, obrázky) zlepšujú Ad Rank — a sú zadarmo.</li>
+      <li>Neexistuje „pozícia, ktorú si kúpim". Každý používateľ vidí výsledok samostatnej aukcie.</li>
+    </ol>
+  </div>
+
+  <h3>Ako to vyzerá na Mete</h3>
+  <p>Princíp je rovnaký, len sa inak volá. Vyhráva najvyššia <em>celková hodnota</em>:</p>
+  <div class="formula">
+    <span class="formula-label">Total value (Meta)</span>
+    <p><strong>Ponuka</strong> × <strong>odhadovaná miera akcie</strong> (pravdepodobnosť, že človek urobí želanú akciu) + <strong>kvalita reklamy</strong></p>
+  </div>
+  <p>V Ads Manageri to vidíš ako diagnostiku <em>Quality ranking</em>, <em>Engagement rate ranking</em> a <em>Conversion rate ranking</em> — hodnotené v percentiloch voči konkurencii.</p>
+
+  <h3>Prehľady aukcií (Auction Insights)</h3>
+  <p>Report, ktorý ti ukáže, s kým reálne súťažíš. Štyri metriky, ktoré musíš vedieť prečítať:</p>
+  <ul class="def-list">
+    <li><strong>Impression share</strong> — koľko % zobrazení, na ktoré si mal nárok, si získal. Pod 100 % strácaš buď rozpočtom, alebo hodnotením (rank).</li>
+    <li><strong>Overlap rate</strong> — ako často sa v aukcii objavuje ten istý konkurent ako ty.</li>
+    <li><strong>Outranking share</strong> — ako často si bol nad konkurentom.</li>
+    <li><strong>Top of page rate</strong> — ako často si bol nad organickými výsledkami.</li>
+  </ul>
+  <div class="callout warn">
+    <strong>Diagnostika stratených zobrazení:</strong> ak strácaš <em>rozpočtom</em> (Lost IS budget), riešením je rozpočet alebo zúženie cielenia. Ak strácaš <em>hodnotením</em> (Lost IS rank), rozpočet ti nepomôže — potrebuješ lepšiu kvalitu alebo vyššiu ponuku.
+  </div>
+</section>
+
+<!-- ================= SKÓRE KVALITY ================= -->
+<section id="kvalita" class="section">
+  <p class="section-num">02</p>
+  <h2>Skóre kvality</h2>
+  <p class="section-lede">Známka 1–10 na úrovni kľúčového slova. Nie je to metrika, ktorú optimalizuješ pre ňu samú — je to <strong>diagnostický nástroj</strong>, ktorý ti povie, kde presne máš problém.</p>
+
+  <div class="grid-3">
+    <div class="card">
+      <span class="pill">Zložka 1</span>
+      <h4>Očakávaná miera prekliku</h4>
+      <p>Pravdepodobnosť, že na reklamu niekto klikne, keď sa zobrazí na toto kľúčové slovo. Najväčšia váha z troch zložiek.</p>
+    </div>
+    <div class="card">
+      <span class="pill">Zložka 2</span>
+      <h4>Relevancia reklamy</h4>
+      <p>Ako veľmi text reklamy zodpovedá tomu, čo človek hľadal.</p>
+    </div>
+    <div class="card">
+      <span class="pill">Zložka 3</span>
+      <h4>Skúsenosť s cieľovou stránkou</h4>
+      <p>Či stránka po kliknutí dáva to, čo reklama sľúbila — obsahovo, rýchlosťou aj použiteľnosťou.</p>
+    </div>
+  </div>
+
+  <p>Každá zložka sa hodnotí ako <span class="tag ok">Nadpriemerné</span> <span class="tag mid">Priemerné</span> <span class="tag bad">Podpriemerné</span>. Práve tieto tri stĺpce sú dôležitejšie než samotné číslo.</p>
+
+  <h3>Čo robiť pri každej diagnóze</h3>
+  <div class="table-scroll">
+  <table>
+    <thead>
+      <tr><th>Podpriemerné je…</th><th>Príčina býva</th><th>Čo urobiť</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Očakávaná CTR</strong></td>
+        <td>Reklama nevyčnieva, chýba benefit alebo cena, kľúčové slovo je príliš všeobecné</td>
+        <td>Daj kľúčové slovo do nadpisu 1, pridaj konkrétne číslo alebo benefit, otestuj silnejšie CTA, doplň všetky assety</td>
+      </tr>
+      <tr>
+        <td><strong>Relevancia reklamy</strong></td>
+        <td>V jednej reklamnej skupine máš príliš veľa rôznych tém</td>
+        <td>Rozdeľ skupinu na tesné tematické celky (5–15 príbuzných kľúčových slov), prepíš texty pre každú tému zvlášť</td>
+      </tr>
+      <tr>
+        <td><strong>Cieľová stránka</strong></td>
+        <td>Posielaš na homepage, stránka je pomalá alebo nemá obsah k danej téme</td>
+        <td>Vytvor stránku pre danú tému, zrýchli načítanie, zopakuj na nej formuláciu z reklamy (pozri <a href="#landing">pravidlá pre landing page</a>)</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="callout tip">
+    <strong>Kde to nájdeš:</strong> Google Ads → Kľúčové slová → Stĺpce → Skóre kvality. Zapni si <em>Skóre kvality</em>, <em>Oček. mieru prekliku</em>, <em>Relevanciu reklamy</em> a <em>Skúsenosť s cieľovou stránkou</em> (a aj ich historické verzie, aby si videl vývoj v čase).
+  </div>
+
+  <h3>Štyri mýty, ktoré ťa budú stáť peniaze</h3>
+  <ul class="def-list">
+    <li><strong>„Zvýšim ponuku a skóre stúpne."</strong> Nie. Ponuka na skóre kvality nemá vplyv. Funguje to naopak.</li>
+    <li><strong>„Skóre kvality je vstup do aukcie."</strong> Nie presne. Zobrazené skóre 1–10 je historický súhrn. V aukcii sa kvalita počíta v reálnom čase pre konkrétny dopyt.</li>
+    <li><strong>„Vymažem slová so skóre 4 a bude to lepšie."</strong> Nie, ak konvertujú. Ak nízke skóre slovo prináša lacné konverzie, nechaj ho a rieš príčinu.</li>
+    <li><strong>„Kvalita sa počíta iba na kľúčovom slove."</strong> Historická výkonnosť účtu a domény hrá rolu. Nový účet štartuje bez kreditu — prvé týždne sú drahšie.</li>
+  </ul>
+</section>
+
+<!-- ================= FUNNEL ================= -->
+<section id="funnel" class="section">
+  <p class="section-num">03</p>
+  <h2>Funnel a typy kampaní</h2>
+  <p class="section-lede">Každý typ kampane vie niečo iné. Keď dáš kampaň do nesprávnej fázy lievika a meriaš ju nesprávnou metrikou, vyhodnotíš ju ako zlú — hoci robí presne to, na čo je určená.</p>
+
+  <div class="funnel">
+    <div class="stage stage-tofu">
+      <div class="stage-head">
+        <span class="stage-tag">TOFU</span>
+        <h3>Povedomie — človek ťa ešte nepozná</h3>
+      </div>
+      <div class="stage-body">
+        <div>
+          <h5>Typy kampaní</h5>
+          <ul>
+            <li>YouTube / Video (dosah, zhliadnutia)</li>
+            <li>Demand Gen (Discover, Gmail, YouTube feed)</li>
+            <li>Display / GDN — obsahová sieť</li>
+            <li>Meta: Awareness, Video views, Reach</li>
+            <li>PR, obsah, spolupráce</li>
+          </ul>
+        </div>
+        <div>
+          <h5>Cielenie</h5>
+          <ul>
+            <li>Záujmy, demografia, in-market publiká</li>
+            <li>Lookalike z najlepších zákazníkov</li>
+            <li>Široké cielenie + silný kreatív</li>
+          </ul>
+        </div>
+        <div>
+          <h5>KPI</h5>
+          <ul>
+            <li>Zásah, frekvencia, CPM</li>
+            <li>Dokončené zhliadnutia, CPV</li>
+            <li>Nárast brandových vyhľadávaní</li>
+            <li class="kpi-no">Nie: ROAS z posledného kliku</li>
+          </ul>
+        </div>
+      </div>
+      <p class="stage-budget"><strong>Orientačný podiel rozpočtu:</strong> 10–20 % (zabehnutá značka) · 30–40 % (nová značka alebo nový trh)</p>
+    </div>
+
+    <div class="stage stage-mofu">
+      <div class="stage-head">
+        <span class="stage-tag">MOFU</span>
+        <h3>Zvažovanie — rieši problém, porovnáva riešenia</h3>
+      </div>
+      <div class="stage-body">
+        <div>
+          <h5>Typy kampaní</h5>
+          <ul>
+            <li>Search na generické a informačné dopyty</li>
+            <li>Demand Gen / Video action</li>
+            <li>Display remarketing na návštevníkov blogu</li>
+            <li>Performance Max (prekrýva viac fáz)</li>
+            <li>Meta: Traffic, Engagement, Lead ads</li>
+          </ul>
+        </div>
+        <div>
+          <h5>Obsah, ktorý funguje</h5>
+          <ul>
+            <li>Porovnania, recenzie, prípadové štúdie</li>
+            <li>Kalkulačky, konfigurátory, ukážky</li>
+            <li>Webináre, e-booky, demo</li>
+          </ul>
+        </div>
+        <div>
+          <h5>KPI</h5>
+          <ul>
+            <li>Cena za mikro konverziu</li>
+            <li>Miera zapojenia, čas na stránke</li>
+            <li>Rast remarketingových publík</li>
+            <li>Asistované konverzie</li>
+          </ul>
+        </div>
+      </div>
+      <p class="stage-budget"><strong>Orientačný podiel rozpočtu:</strong> 20–30 %</p>
+    </div>
+
+    <div class="stage stage-bofu">
+      <div class="stage-head">
+        <span class="stage-tag">BOFU</span>
+        <h3>Konverzia — vie, čo chce, vyberá si u koho</h3>
+      </div>
+      <div class="stage-body">
+        <div>
+          <h5>Typy kampaní</h5>
+          <ul>
+            <li>Search: brand + transakčné dopyty („cena", „kúpiť", „najlepší", názov produktu)</li>
+            <li>Shopping / nákupné kampane</li>
+            <li>Remarketing a dynamický remarketing</li>
+            <li>Performance Max s feedom</li>
+            <li>Meta: Sales / Catalog sales, Lead gen</li>
+          </ul>
+        </div>
+        <div>
+          <h5>Čo musí sedieť</h5>
+          <ul>
+            <li>Landing page presne na daný produkt</li>
+            <li>Ceny, dostupnosť, doprava viditeľne</li>
+            <li>Dôveryhodnosť a recenzie</li>
+            <li>Funkčné meranie konverzií</li>
+          </ul>
+        </div>
+        <div>
+          <h5>KPI</h5>
+          <ul>
+            <li>CPA, ROAS, konverzný pomer</li>
+            <li>Podiel zobrazení (impression share)</li>
+            <li>Marža a príspevok na zisk</li>
+          </ul>
+        </div>
+      </div>
+      <p class="stage-budget"><strong>Orientačný podiel rozpočtu:</strong> 50–60 %</p>
+    </div>
+
+    <div class="stage stage-retention">
+      <div class="stage-head">
+        <span class="stage-tag">RETENCIA</span>
+        <h3>Po nákupe — najlacnejší rast, na ktorý sa zabúda</h3>
+      </div>
+      <div class="stage-body">
+        <div>
+          <h5>Kanály</h5>
+          <ul>
+            <li>E-mail a newsletter, automatizácie</li>
+            <li>Customer Match publiká (cross-sell)</li>
+            <li>Vylúčenie existujúcich zákazníkov z akvizície</li>
+          </ul>
+        </div>
+        <div>
+          <h5>KPI</h5>
+          <ul>
+            <li>Opakovaný nákup, CLV</li>
+            <li>Frekvencia nákupu</li>
+            <li>Podiel tržieb z vlastných databáz</li>
+          </ul>
+        </div>
+        <div>
+          <h5>Prečo to riešiť</h5>
+          <ul>
+            <li>Nulová cena za médiá</li>
+            <li>Vyššia marža ako pri akvizícii</li>
+            <li>Lepšie signály pre smart bidding</li>
+          </ul>
+        </div>
+      </div>
+      <p class="stage-budget"><strong>Orientačný podiel rozpočtu:</strong> 5–10 % (najmä čas a nástroje, nie médiá)</p>
+    </div>
+  </div>
+
+  <div class="callout warn">
+    <strong>Poradie, v akom to stavať:</strong> najprv zober dopyt, ktorý už existuje (brand Search → transakčný Search → Shopping → remarketing). Až keď máš toto vyčerpané a stále ti zostáva rozpočet, začni dopyt <em>vytvárať</em> (Video, Demand Gen, Display). Opačné poradie je najdrahšia cesta, akou sa dá začať.
+  </div>
+
+  <div class="callout tip">
+    <strong>Pozor na PMax a Demand Gen:</strong> tieto kampane prechádzajú naprieč celým lievikom naraz. Ak ich pustíš bez vylúčenia brandových dopytov a bez kvalitného feedu, „zjedia" ti konverzie, ktoré by prišli aj zadarmo — a v reportoch budú vyzerať skvele.
+  </div>
+
+  <h3>Pravidlo merania podľa fázy</h3>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Fáza</th><th>Hlavná otázka</th><th>Metrika</th><th>Horizont vyhodnotenia</th></tr></thead>
+    <tbody>
+      <tr><td>TOFU</td><td>Videlo ma dosť relevantných ľudí?</td><td>Zásah, CPM, CPV, brand search</td><td>1–3 mesiace</td></tr>
+      <tr><td>MOFU</td><td>Posunuli sa ďalej?</td><td>Mikro konverzie, veľkosť publík</td><td>2–6 týždňov</td></tr>
+      <tr><td>BOFU</td><td>Zarába to?</td><td>CPA, ROAS, marža</td><td>1–4 týždne</td></tr>
+      <tr><td>Retencia</td><td>Vracajú sa?</td><td>CLV, opakovaný nákup</td><td>3–12 mesiacov</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ================= KONVERZIE ================= -->
+<section id="konverzie" class="section">
+  <p class="section-num">04</p>
+  <h2>Pravidlá pre konverzie</h2>
+  <p class="section-lede">Zlé meranie je horšie než žiadne meranie — pri žiadnom aspoň vieš, že nevieš. Pri zlom sa rozhoduješ podľa čísel, ktoré klamú, a algoritmus sa učí na nesprávnych signáloch.</p>
+
+  <ol class="rules">
+    <li>
+      <h4>Rozlíš makro a mikro konverzie</h4>
+      <p><strong>Makro</strong> = to, z čoho máš peniaze (objednávka, odoslaný dopyt, podpísaná zmluva). <strong>Mikro</strong> = krok k nej (pridanie do košíka, prehratie videa, klik na telefón). Obe meraj, ale nikdy ich nesčítavaj do jedného čísla.</p>
+    </li>
+    <li>
+      <h4>Jedna primárna konverzia na jeden cieľ kampane</h4>
+      <p>Ako <em>primárne</em> (Primary) označ len to, na čo má algoritmus optimalizovať. Všetko ostatné daj ako <em>sekundárne</em> (Secondary) — nameria sa, ale nebude to ovplyvňovať biddovanie.</p>
+    </li>
+    <li>
+      <h4>Nemiešaj dva zdroje tej istej konverzie</h4>
+      <p>Import nákupu z GA4 <em>aj</em> natívny Google Ads tag = dvojité počítanie. Vyber si jeden zdroj pravdy a druhý nechaj ako sekundárny alebo ho vypni.</p>
+    </li>
+    <li>
+      <h4>Deduplikuj transakcie</h4>
+      <p>Posielaj <code>transaction_id</code> (resp. order ID) pri každom nákupe. Bez toho ti obnovenie ďakovnej stránky vygeneruje novú konverziu.</p>
+    </li>
+    <li>
+      <h4>Správne nastav počítanie</h4>
+      <p><strong>Každá</strong> (Every) pre e-shop — 3 objednávky = 3 konverzie. <strong>Jedna</strong> (One) pre leady — ten istý človek, ktorý odošle formulár trikrát, je stále jeden lead.</p>
+    </li>
+    <li>
+      <h4>Konverzné okno nastav podľa dĺžky rozhodovania</h4>
+      <p>Predvolených 30 dní od kliku sedí pre bežný e-shop. Pri drahších a dlhých nákupoch (auto, nehnuteľnosť, B2B softvér) predlž okno, inak si podhodnotíš horné fázy lievika. Pri impulzívnych nákupoch pokojne skráť.</p>
+    </li>
+    <li>
+      <h4>Každej konverzii daj hodnotu — aj leadu</h4>
+      <p>Bez hodnôt nevieš optimalizovať na zisk, len na počet. Ak nepoznáš presnú hodnotu, odhadni ju: dopyt z formulára = 20 €, telefonát = 35 €, podpísaná zmluva = 500 €. Lepší odhad než nula.</p>
+    </li>
+    <li>
+      <h4>Meraj skutočný zisk, nie obrat</h4>
+      <p>ROAS 400 % pri marži 20 % je stratový biznis. Ak vieš, posielaj hodnotu konverzie v marži, nie v cene s DPH. Minimálne si vypočítaj break-even ROAS (nájdeš ho v <a href="#kalkulacka">kalkulačke</a>).</p>
+    </li>
+    <li>
+      <h4>Zapni Enhanced Conversions a Consent Mode v2</h4>
+      <p>Vylepšené konverzie doplnia časť dát, ktoré sa stratia kvôli blokovaniu cookies. Consent Mode v2 je v EÚ nutnosť — bez neho prichádzaš o meranie aj o remarketingové publiká.</p>
+    </li>
+    <li>
+      <h4>Pre leadový biznis rieš offline konverzie</h4>
+      <p>Ulož si <code>GCLID</code> / <code>wbraid</code> do CRM a pri uzavretom obchode ho pošli späť do Google Ads. Až vtedy sa algoritmus učí prinášať <em>kvalitné</em> leady, nie len lacné.</p>
+    </li>
+    <li>
+      <h4>Rešpektuj minimálny objem dát pre smart bidding</h4>
+      <p>Orientačne: aspoň 15 konverzií za 30 dní pre tCPA a aspoň 30 pre tROAS. Pod touto hranicou optimalizuj na mikro konverziu alebo zatiaľ používaj maximalizáciu klikov.</p>
+    </li>
+    <li>
+      <h4>Vyhodnocuj na dátami riadenej atribúcii</h4>
+      <p>Last click podhodnotí všetko, čo bolo skôr v lieviku. Ak sa rozhoduješ o vypnutí TOFU kampane podľa last-click ROAS, takmer vždy vypneš niečo, čo ti reálne pomáhalo.</p>
+    </li>
+  </ol>
+
+  <div class="callout warn">
+    <strong>Diagnostika za 5 minút — skontroluj, či:</strong>
+    <ul>
+      <li>počet konverzií v Google Ads zhruba sedí s počtom objednávok v e-shope (rozdiel nad ±10 % rieš),</li>
+      <li>nemáš dve konverzné akcie pre tú istú udalosť v primárnych,</li>
+      <li>hodnoty konverzií nie sú nulové ani nezmyselne vysoké,</li>
+      <li>stav tagu je „Aktívne" a nie „Nedávno bez aktivity",</li>
+      <li>testovacia objednávka sa naozaj zaznamená (sprav ju a počkaj do druhého dňa).</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= LANDING PAGE ================= -->
+<section id="landing" class="section">
+  <p class="section-num">05</p>
+  <h2>Pravidlá pre landing page</h2>
+  <p class="section-lede">Reklama predáva klik. Stránka predáva produkt. Zlepšenie konverzného pomeru z 1 % na 2 % má rovnaký efekt ako zdvojnásobenie rozpočtu — len je zadarmo.</p>
+
+  <div class="grid-2">
+    <div class="card num-card"><span class="ncard-num">1</span>
+      <h4>Zhoda odkazu (message match)</h4>
+      <p>Formulácia z reklamy musí byť viditeľná na stránke v prvej obrazovke. Človek hľadal „kurz google ads pre začiatočníkov" — presne toto musí vidieť po kliknutí. Inak sa vráti späť a ty platíš za nič.</p>
+    </div>
+    <div class="card num-card"><span class="ncard-num">2</span>
+      <h4>Jedna stránka = jeden cieľ</h4>
+      <p>Jedno primárne CTA, opakované na viacerých miestach. Každá ďalšia možnosť voľby znižuje šancu, že si človek vyberie tú tvoju.</p>
+    </div>
+    <div class="card num-card"><span class="ncard-num">3</span>
+      <h4>Prvá obrazovka odpovie na 4 otázky</h4>
+      <p>Čo to je · pre koho to je · prečo práve ty (benefit, číslo, dôkaz) · čo mám urobiť ďalej. Bez scrollovania, do 5 sekúnd.</p>
+    </div>
+    <div class="card num-card"><span class="ncard-num">4</span>
+      <h4>Rýchlosť je konverzná funkcia</h4>
+      <p>Cieľ: LCP do 2,5 s, INP do 200 ms, CLS pod 0,1. Skontroluj v PageSpeed Insights a meraj mobilné skóre, nie desktopové.</p>
+    </div>
+    <div class="card num-card"><span class="ncard-num">5</span>
+      <h4>Mobil je hlavná verzia</h4>
+      <p>Väčšina návštev z reklamy je z mobilu. Palcom dosiahnuteľné CTA, text čitateľný bez zoomovania, telefón ako klikateľný odkaz.</p>
+    </div>
+    <div class="card num-card"><span class="ncard-num">6</span>
+      <h4>Formulár: čím kratší, tým lepší</h4>
+      <p>3–5 polí. Každé pole navyše stojí konverzie. Pýtaj sa len na to, čo naozaj potrebuješ na prvý kontakt — zvyšok zistíš v telefóne.</p>
+    </div>
+    <div class="card num-card"><span class="ncard-num">7</span>
+      <h4>Dôveryhodnosť musí byť vidieť</h4>
+      <p>Referencie s menom a fotkou, konkrétne čísla, logá klientov, kontakt na človeka, fakturačné údaje, podmienky vrátenia. Anonymná stránka nepredáva.</p>
+    </div>
+    <div class="card num-card"><span class="ncard-num">8</span>
+      <h4>Odstráň úniky</h4>
+      <p>Na čistej kampaňovej landing page vynechaj rozsiahle menu a odkazy „preč". Na e-shopovej produktovej stránke naopak navigáciu nechaj — tam je súčasťou nákupu.</p>
+    </div>
+    <div class="card num-card"><span class="ncard-num">9</span>
+      <h4>Námietky rieš priamo na stránke</h4>
+      <p>Cena, dĺžka, náročnosť, „zvládnem to?", garancia, čo ak to nebude sedieť. Napíš FAQ z otázok, ktoré ti reálne chodia mailom.</p>
+    </div>
+    <div class="card num-card"><span class="ncard-num">10</span>
+      <h4>Stránka musí byť merateľná</h4>
+      <p>Konverzný event na odoslanie formulára (nie iba pageview ďakovnej stránky), meranie klikov na telefón a e-mail, correct consent, UTM parametre.</p>
+    </div>
+    <div class="card num-card"><span class="ncard-num">11</span>
+      <h4>Jedna téma = jedna stránka</h4>
+      <p>Samostatná stránka pre každú hlavnú tému kampane. Pomáha to konverznému pomeru aj hodnoteniu <a href="#kvalita">skúsenosti s cieľovou stránkou</a>.</p>
+    </div>
+    <div class="card num-card"><span class="ncard-num">12</span>
+      <h4>Testuj po jednej hypotéze</h4>
+      <p>Meň jednu vec naraz (nadpis, CTA, dĺžka formulára) a počkaj na dostatočnú vzorku — rádovo stovky konverzií, nie desiatky návštev. Inak testuješ náhodu.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= CHECKLIST ================= -->
+<section id="checklist" class="section">
+  <p class="section-num">06</p>
+  <h2>Checklist pred spustením kampane</h2>
+  <p class="section-lede">Prejdi si ho pred každým štartom. Odškrtnutie sa uloží v tvojom prehliadači.</p>
+
+  <div class="checklist-grid">
+    <div class="checklist-col">
+      <h4>Meranie</h4>
+      <label class="check"><input type="checkbox" data-ck="m1"><span>Konverzné akcie sú nastavené a testovacia konverzia sa zaznamenala</span></label>
+      <label class="check"><input type="checkbox" data-ck="m2"><span>Primárna konverzia je práve jedna a je to tá správna</span></label>
+      <label class="check"><input type="checkbox" data-ck="m3"><span>Konverzie majú priradené hodnoty</span></label>
+      <label class="check"><input type="checkbox" data-ck="m4"><span>Consent Mode v2 a cookie lišta fungujú</span></label>
+      <label class="check"><input type="checkbox" data-ck="m5"><span>Google Ads je prepojený s GA4 a s Merchant Center (ak treba)</span></label>
+      <label class="check"><input type="checkbox" data-ck="m6"><span>Vylepšené konverzie (Enhanced Conversions) sú zapnuté</span></label>
+    </div>
+    <div class="checklist-col">
+      <h4>Kampaň</h4>
+      <label class="check"><input type="checkbox" data-ck="k1"><span>Cieľ kampane zodpovedá fáze lievika</span></label>
+      <label class="check"><input type="checkbox" data-ck="k2"><span>Vylúčené sú irelevantné lokality a jazyky</span></label>
+      <label class="check"><input type="checkbox" data-ck="k3"><span>Partnerská sieť a Display expansion sú vedome zapnuté/vypnuté</span></label>
+      <label class="check"><input type="checkbox" data-ck="k4"><span>Zoznam vylučovacích kľúčových slov existuje</span></label>
+      <label class="check"><input type="checkbox" data-ck="k5"><span>Stratégia ponúk zodpovedá objemu dát</span></label>
+      <label class="check"><input type="checkbox" data-ck="k6"><span>Denný rozpočet umožní aspoň 10 klikov denne</span></label>
+      <label class="check"><input type="checkbox" data-ck="k7"><span>Existujúci zákazníci sú vylúčení z akvizície</span></label>
+    </div>
+    <div class="checklist-col">
+      <h4>Reklamy a stránka</h4>
+      <label class="check"><input type="checkbox" data-ck="r1"><span>Kľúčové slovo je v nadpise reklamy</span></label>
+      <label class="check"><input type="checkbox" data-ck="r2"><span>Vyplnené sú všetky assety (odkazy, popisy, obrázky, logo)</span></label>
+      <label class="check"><input type="checkbox" data-ck="r3"><span>Landing page zodpovedá sľubu z reklamy</span></label>
+      <label class="check"><input type="checkbox" data-ck="r4"><span>Mobilné PageSpeed skóre je skontrolované</span></label>
+      <label class="check"><input type="checkbox" data-ck="r5"><span>Formulár je otestovaný a e-mail naozaj príde</span></label>
+      <label class="check"><input type="checkbox" data-ck="r6"><span>URL obsahuje UTM parametre alebo auto-tagging je zapnutý</span></label>
+    </div>
+  </div>
+  <div class="checklist-actions">
+    <p class="check-progress" id="checkProgress">Hotovo 0 z 19</p>
+    <button class="btn btn-ghost btn-sm" id="resetCheck" type="button">Vynulovať</button>
+  </div>
+</section>
+
+<!-- ================= KALKULAČKA ================= -->
+<section id="kalkulacka" class="section">
+  <p class="section-num">07</p>
+  <h2>Kalkulačka: break-even CPC, CPA a ROAS</h2>
+  <p class="section-lede">Než nastavíš ponuku, musíš vedieť, koľko si vôbec môžeš dovoliť zaplatiť. Zadaj štyri čísla.</p>
+
+  <div class="calc">
+    <div class="calc-inputs">
+      <label>Priemerná hodnota objednávky / zákazky (€)
+        <input type="number" id="aov" value="80" min="0" step="1">
+      </label>
+      <label>Hrubá marža (%)
+        <input type="number" id="margin" value="30" min="0" max="100" step="1">
+      </label>
+      <label>Konverzný pomer stránky (%)
+        <input type="number" id="cr" value="2" min="0.01" max="100" step="0.1">
+      </label>
+      <label>Tvoja reálna cena za klik (€)
+        <input type="number" id="cpc" value="0.45" min="0" step="0.01">
+      </label>
+    </div>
+    <div class="calc-results" id="calcResults">
+      <div class="res"><span class="res-label">Zisk z jednej objednávky</span><span class="res-val" id="rProfit">—</span></div>
+      <div class="res"><span class="res-label">Break-even CPA (max. cena za konverziu)</span><span class="res-val" id="rCpa">—</span></div>
+      <div class="res"><span class="res-label">Break-even CPC (max. cena za klik)</span><span class="res-val" id="rCpc">—</span></div>
+      <div class="res"><span class="res-label">Break-even ROAS (minimum, aby si nebol v strate)</span><span class="res-val" id="rRoas">—</span></div>
+      <hr>
+      <div class="res"><span class="res-label">Pri tvojom CPC vyjde konverzia na</span><span class="res-val" id="rRealCpa">—</span></div>
+      <div class="res"><span class="res-label">Dosiahnutý ROAS</span><span class="res-val" id="rRealRoas">—</span></div>
+      <div class="res"><span class="res-label">Zisk / strata na objednávku</span><span class="res-val" id="rMargin">—</span></div>
+      <p class="calc-verdict" id="verdict"></p>
+    </div>
+  </div>
+  <p class="small">Výpočet počíta len s nákladmi na médiá a hrubou maržou. Réžiu, prácu a náklady na vratky si doplň sám — reálny strop býva nižší, než ti vyjde tu.</p>
+</section>
+
+<!-- ================= POJMY ================= -->
+<section id="pojmy" class="section">
+  <p class="section-num">08</p>
+  <h2>Slovníček pojmov</h2>
+  <p class="section-lede">Skratky, ktoré budeš počuť na každom meetingu.</p>
+  <dl class="glossary">
+    <div><dt>CPC</dt><dd>Cost Per Click — cena za jeden klik.</dd></div>
+    <div><dt>CPM</dt><dd>Cost Per Mille — cena za 1 000 zobrazení.</dd></div>
+    <div><dt>CTR</dt><dd>Click-Through Rate — kliky ÷ zobrazenia.</dd></div>
+    <div><dt>CPA</dt><dd>Cost Per Acquisition — cena za jednu konverziu.</dd></div>
+    <div><dt>ROAS</dt><dd>Return On Ad Spend — tržby ÷ náklady na reklamu.</dd></div>
+    <div><dt>PNO</dt><dd>Podiel nákladov na obrate — prevrátená hodnota ROAS v %.</dd></div>
+    <div><dt>CLV / LTV</dt><dd>Celková hodnota zákazníka počas celého vzťahu.</dd></div>
+    <div><dt>Ad Rank</dt><dd>Hodnotenie reklamy, ktoré rozhoduje o pozícii v aukcii.</dd></div>
+    <div><dt>Impression share</dt><dd>Podiel získaných zobrazení z tých, na ktoré si mal nárok.</dd></div>
+    <div><dt>PMax</dt><dd>Performance Max — kampaň naprieč všetkými plochami Googlu.</dd></div>
+    <div><dt>RSA</dt><dd>Responsive Search Ad — flexibilná reklama vo vyhľadávaní.</dd></div>
+    <div><dt>GCLID</dt><dd>Identifikátor kliku z Google Ads, kľúč k offline konverziám.</dd></div>
+    <div><dt>Smart bidding</dt><dd>Automatické stratégie ponúk riadené strojovým učením.</dd></div>
+    <div><dt>Remarketing</dt><dd>Cielenie na ľudí, ktorí už boli na tvojom webe.</dd></div>
+    <div><dt>Lookalike</dt><dd>Publikum podobné tvojim existujúcim zákazníkom.</dd></div>
+    <div><dt>Core Web Vitals</dt><dd>LCP, INP a CLS — metriky rýchlosti a stability stránky.</dd></div>
+  </dl>
+</section>
+
+<!-- ================= KONTAKT ================= -->
+<section id="kontakt" class="section section-contact">
+  <div class="contact-box">
+    <p class="eyebrow">Školenia na ITLearning</p>
+    <h2>Máš otázku alebo chceš školenie na mieru?</h2>
+    <p>Rád ti pomôžem s nastavením kampaní, meraním konverzií aj s vyhodnocovaním výsledkov. Ozvi sa — mailom alebo telefónom.</p>
+    <div class="contact-links">
+      <a class="contact-item" href="mailto:mirogregor24@gmail.com">
+        <span class="ci-icon">✉</span>
+        <span><span class="ci-label">E-mail</span><strong>mirogregor24@gmail.com</strong></span>
+      </a>
+      <a class="contact-item" href="tel:+421904329454">
+        <span class="ci-icon">☎</span>
+        <span><span class="ci-label">Telefón</span><strong>+421 904 329 454</strong></span>
+      </a>
+    </div>
+  </div>
+</section>
+
+</article>
+</div>
+
+</main>
+
+<footer class="footer">
+  <div class="wrap footer-inner">
+    <p><strong>Marketingová príručka pre začiatočníkov</strong><br>Doplnkový materiál ku školeniam na ITLearning.</p>
+    <p class="footer-contact">
+      <a href="mailto:mirogregor24@gmail.com">mirogregor24@gmail.com</a> ·
+      <a href="tel:+421904329454">+421 904 329 454</a>
+    </p>
+    <p class="small">Uvedené hodnoty a podiely rozpočtov sú orientačné východiská, nie záruka výsledku. Vždy ich over na vlastných dátach.</p>
+  </div>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
