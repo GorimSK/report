@@ -224,6 +224,8 @@ code{background:var(--surface-2); padding:.12em .4em; border-radius:6px; font-si
 .row-you{background:var(--accent-soft)}
 .row-you td{font-weight:600}
 .row-out td{color:var(--text-dim)}
+.row-cut td{border-top:2px dashed var(--bad); padding-top:14px}
+.row-cut td:first-child::after{content:" hranica reklám"; display:block; font-size:.68rem; text-transform:uppercase; letter-spacing:.06em; color:var(--bad); font-weight:700}
 .sim-verdict{
   margin:16px 0 0 !important; padding:14px 16px; border-radius:var(--radius-sm); font-size:.95rem; font-weight:600;
   background:var(--accent-soft); border:1px solid color-mix(in srgb, var(--accent) 24%, transparent);

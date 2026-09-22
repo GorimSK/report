@@ -146,12 +146,19 @@
   var simBody = document.getElementById('simBody');
   var simVerdict = document.getElementById('simVerdict');
   var simThreshold = document.getElementById('simThreshold');
+  var simSlots = document.getElementById('simSlots');
   var simNames = [
     { name: 'Ty', acc: 'teba' },
     { name: 'Konkurent B', acc: 'konkurenta B' },
-    { name: 'Konkurent C', acc: 'konkurenta C' }
+    { name: 'Konkurent C', acc: 'konkurenta C' },
+    { name: 'Konkurent D', acc: 'konkurenta D' },
+    { name: 'Konkurent E', acc: 'konkurenta E' },
+    { name: 'Konkurent F', acc: 'konkurenta F' }
   ];
-  var simDefaults = [{ bid: '1.00', q: '10' }, { bid: '2.00', q: '4' }, { bid: '1.50', q: '3' }];
+  var simDefaults = [
+    { bid: '1.00', q: '10' }, { bid: '2.00', q: '4' }, { bid: '1.50', q: '3' },
+    { bid: '0.80', q: '7' }, { bid: '3.00', q: '2' }, { bid: '0.50', q: '9' }
+  ];
 
   function simEl(cls, i) {
     return document.querySelector('.' + cls + '[data-i="' + i + '"]');
@@ -163,6 +170,7 @@
   function simRender() {
     if (!simBody) return;
     var threshold = parseFloat(simThreshold.value) || 0;
+    var slots = Math.max(1, parseInt(simSlots.value, 10) || 1);
 
     var all = simNames.map(function (who, i) {
       var bidEl = simEl('sim-bid', i);
@@ -174,41 +182,59 @@
       return { name: who.name, acc: who.acc, you: i === 0, bid: bid, q: q, rank: bid * q };
     });
 
-    var shown = all.filter(function (a) { return a.bid > 0 && a.rank >= threshold; })
+    // cez prah sa dostanú len niektorí, do reklám ešte menej — koľko je pozícií
+    var eligible = all.filter(function (a) { return a.bid > 0 && a.rank >= threshold; })
       .sort(function (x, y) { return y.rank - x.rank; });
-    var out = all.filter(function (a) { return shown.indexOf(a) === -1; });
+    var under = all.filter(function (a) { return eligible.indexOf(a) === -1; })
+      .sort(function (x, y) { return y.rank - x.rank; });
 
-    shown.forEach(function (a, i) {
-      var below = shown[i + 1];
+    // cenu pozície určuje najbližší nižší Ad Rank — aj ten, kto sa do reklám už nezmestil
+    eligible.forEach(function (a, i) {
+      var below = eligible[i + 1];
+      a.shown = i < slots;
       a.pos = i + 1;
       a.cpc = Math.min(a.bid, (below ? below.rank : threshold) / a.q + 0.01);
     });
 
-    var rows = shown.map(function (a) {
-      return '<tr' + (a.you ? ' class="row-you"' : '') + '>' +
-        '<td><strong>' + a.pos + '.</strong></td>' +
-        '<td>' + a.name + '</td>' +
-        '<td>' + eur(a.bid) + '</td>' +
-        '<td>' + a.q + '</td>' +
-        '<td>' + num(a.rank) + '</td>' +
-        '<td><strong>' + eur(a.cpc) + '</strong></td></tr>';
-    }).concat(out.map(function (a) {
-      return '<tr class="row-out' + (a.you ? ' row-you' : '') + '">' +
-        '<td>—</td><td>' + a.name + '</td><td>' + eur(a.bid) + '</td><td>' + a.q + '</td>' +
-        '<td>' + num(a.rank) + '</td><td>nezobrazí sa</td></tr>';
+    var cutDone = false;
+    function cut() {
+      if (cutDone) return '';
+      cutDone = true;
+      return ' row-cut';
+    }
+    function cells(a) {
+      return '<td>' + a.name + '</td><td>' + eur(a.bid) + '</td><td>' + a.q + '</td><td>' + num(a.rank) + '</td>';
+    }
+    var rows = eligible.map(function (a) {
+      if (a.shown) {
+        return '<tr' + (a.you ? ' class="row-you"' : '') + '><td><strong>' + a.pos + '.</strong></td>' +
+          cells(a) + '<td><strong>' + eur(a.cpc) + '</strong></td></tr>';
+      }
+      return '<tr class="row-out' + cut() + (a.you ? ' row-you' : '') + '"><td>' + a.pos + '.</td>' +
+        cells(a) + '<td>neušlo sa miesto</td></tr>';
+    }).concat(under.map(function (a) {
+      return '<tr class="row-out' + cut() + (a.you ? ' row-you' : '') + '"><td>—</td>' +
+        cells(a) + '<td>pod prahom</td></tr>';
     }));
     simBody.innerHTML = rows.join('');
 
     var you = all[0];
     var msg;
-    if (shown.indexOf(you) === -1) {
-      msg = 'Nezobrazuješ sa vôbec — tvoj Ad Rank ' + num(you.rank) + ' nedosiahol prah ' + num(threshold) + '.';
+    if (under.indexOf(you) !== -1) {
+      msg = 'Nedostal si sa ani do aukcie — tvoj Ad Rank ' + num(you.rank) + ' nedosiahol prah ' + num(threshold) + '.';
+    } else if (!you.shown) {
+      var last = eligible[slots - 1];
+      var bidIn = last.rank / you.q + 0.01;
+      var qIn = Math.ceil((last.rank + 0.01) / you.bid);
+      msg = 'Si ' + you.pos + '. v poradí, ale reklamných pozícií je len ' + slots + ' — nezobrazuješ sa. ' +
+        'Na poslednú pozíciu potrebuješ prekonať Ad Rank ' + num(last.rank) + ': ponuku ' + eur(bidIn) +
+        (qIn <= 10 ? ', alebo ponuku nechať a dostať kvalitu na ' + qIn + '.' : '. Kvalita už nepomôže, jej maximum je 10.');
     } else if (you.pos === 1) {
-      var second = shown[1];
+      var second = eligible[1];
       var minBid = (second ? second.rank : threshold) / you.q + 0.01;
       msg = 'Si na 1. pozícii a platíš ' + eur(you.cpc) + '. Tvoja ponuka je len strop — prvé miesto by si udržal aj s ponukou ' + eur(minBid) + '.';
     } else {
-      var above = shown[you.pos - 2];
+      var above = eligible[you.pos - 2];
       var bidNeeded = above.rank / you.q + 0.01;
       var qNeeded = Math.ceil((above.rank + 0.01) / you.bid);
       msg = 'Si na ' + you.pos + '. pozícii a platíš ' + eur(you.cpc) + '. Predbehnúť ' + above.acc +
@@ -225,6 +251,7 @@
       el.addEventListener('input', simRender);
     });
     simThreshold.addEventListener('input', simRender);
+    simSlots.addEventListener('input', simRender);
     var simReset = document.getElementById('simReset');
     if (simReset) {
       simReset.addEventListener('click', function () {
@@ -235,6 +262,7 @@
           if (qEl) qEl.value = d.q;
         });
         simThreshold.value = '2';
+        simSlots.value = '4';
         simRender();
       });
     }

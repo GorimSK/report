@@ -101,7 +101,7 @@
   </div>
 
   <h3>Čo to znamená v praxi</h3>
-  <p>Reklamu s vyššou kvalitou vie systém umiestniť vyššie aj pri nižšej ponuke — a ešte za ňu zaplatíš menej. Vyskúšaj si to: prepíš ponuky, potiahni kvalitu a sleduj, ako sa mení poradie aj reálna cena za klik. Prednastavený je modelový príklad troch inzerentov, ktorí súťažia o rovnaké kľúčové slovo.</p>
+  <p>Reklamu s vyššou kvalitou vie systém umiestniť vyššie aj pri nižšej ponuke — a ešte za ňu zaplatíš menej. O jedno kľúčové slovo súťaží šesť inzerentov, ale nad výsledkami sú len štyri reklamné pozície — dvaja sa jednoducho nezmestia. Prepíš ponuky, potiahni kvalitu a sleduj, ako sa mení poradie aj reálna cena za klik.</p>
 
   <div class="sim" id="sim">
     <div class="sim-grid">
@@ -132,9 +132,39 @@
           <input type="range" class="sim-q" data-i="2" min="1" max="10" step="1" value="3">
         </label>
       </div>
+      <div class="sim-card">
+        <span class="sim-name">Konkurent D</span>
+        <label>Max. CPC (€)
+          <input type="number" class="sim-bid" data-i="3" value="0.80" min="0.01" step="0.05">
+        </label>
+        <label>Kvalita <output class="sim-q-val" data-i="3">7</output>
+          <input type="range" class="sim-q" data-i="3" min="1" max="10" step="1" value="7">
+        </label>
+      </div>
+      <div class="sim-card">
+        <span class="sim-name">Konkurent E</span>
+        <label>Max. CPC (€)
+          <input type="number" class="sim-bid" data-i="4" value="3.00" min="0.01" step="0.05">
+        </label>
+        <label>Kvalita <output class="sim-q-val" data-i="4">2</output>
+          <input type="range" class="sim-q" data-i="4" min="1" max="10" step="1" value="2">
+        </label>
+      </div>
+      <div class="sim-card">
+        <span class="sim-name">Konkurent F</span>
+        <label>Max. CPC (€)
+          <input type="number" class="sim-bid" data-i="5" value="0.50" min="0.01" step="0.05">
+        </label>
+        <label>Kvalita <output class="sim-q-val" data-i="5">9</output>
+          <input type="range" class="sim-q" data-i="5" min="1" max="10" step="1" value="9">
+        </label>
+      </div>
     </div>
 
     <div class="sim-extra">
+      <label>Reklamných pozícií
+        <input type="number" id="simSlots" value="4" min="1" max="6" step="1">
+      </label>
       <label>Prah Ad Rank (minimum na zobrazenie)
         <input type="number" id="simThreshold" value="2" min="0" step="0.5">
       </label>
@@ -156,7 +186,7 @@
   <div class="formula alt">
     <span class="formula-label">Reálna cena za klik</span>
     <p>CPC ≈ ( Ad Rank inzerenta pod tebou ÷ tvoja kvalita ) + 0,01 €</p>
-    <p class="formula-note">Pri prednastavených hodnotách: 8,0 ÷ 10 + 0,01 = <strong>0,81 €</strong>. Konkurent B ponúkol dvojnásobok, a aj tak je až druhý a platí 1,14 € — lebo mu chýbala kvalita.</p>
+    <p class="formula-note">Pri prednastavených hodnotách zaplatíš 8,0 ÷ 10 + 0,01 = <strong>0,81 €</strong>. Konkurent E dal najvyššiu ponuku zo všetkých (3,00 €) a je až tretí — a platí 2,81 €. Všimni si aj to, že cenu poslednej pozície určuje ten, kto sa do reklám už nedostal.</p>
   </div>
 
   <h3>Prahy Ad Rank (Ad Rank thresholds)</h3>
