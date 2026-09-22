@@ -739,6 +739,93 @@
     </div>
   </div>
 
+
+  <h3>Ako taký AI workflow vyzerá v praxi</h3>
+  <p>Modelový príklad z bežného týždňa — prečistenie vyhľadávacích dopytov, ktoré ťa inak stojí hodiny klikania:</p>
+
+  <div class="flow-scroll">
+    <div class="flow">
+      <div class="flow-step">
+        <span class="flow-ico" aria-hidden="true">📤</span>
+        <span class="flow-num">Krok 1</span>
+        <strong>Export z Ads</strong>
+        <span class="flow-desc">vyhľadávacie dopyty za 30 dní, náklady a konverzie</span>
+      </div>
+      <div class="flow-arrow" aria-hidden="true">→</div>
+      <div class="flow-step">
+        <span class="flow-ico" aria-hidden="true">🤖</span>
+        <span class="flow-num">Krok 2</span>
+        <strong>AI analýza</strong>
+        <span class="flow-desc">zhluky tém, kandidáti na vylučovacie slová, nápady na nové skupiny</span>
+      </div>
+      <div class="flow-arrow" aria-hidden="true">→</div>
+      <div class="flow-step">
+        <span class="flow-ico" aria-hidden="true">📋</span>
+        <span class="flow-num">Krok 3</span>
+        <strong>Návrh zmien</strong>
+        <span class="flow-desc">zoznam úprav aj s odôvodnením — nie hotová vec</span>
+      </div>
+      <div class="flow-arrow" aria-hidden="true">→</div>
+      <div class="flow-step">
+        <span class="flow-ico" aria-hidden="true">🧑‍💻</span>
+        <span class="flow-num">Krok 4</span>
+        <strong>Tvoja kontrola</strong>
+        <span class="flow-desc">ty rozhoduješ, čo dáva zmysel; polovicu návrhov zahodíš</span>
+      </div>
+      <div class="flow-arrow" aria-hidden="true">→</div>
+      <div class="flow-step">
+        <span class="flow-ico" aria-hidden="true">🚀</span>
+        <span class="flow-num">Krok 5</span>
+        <strong>Nasadenie</strong>
+        <span class="flow-desc">zmeny v účte a výsledky späť do ďalšieho kola</span>
+      </div>
+    </div>
+  </div>
+  <p class="small">Kľúčový je krok 4. Rozdiel medzi „AI mi riadi účet" a „AI mi pripravila podklady" je presne v tom, že rozhodnutie zostáva na tebe.</p>
+
+  <h3>n8n: od leadu po konverziu späť v Google Ads</h3>
+  <p>Toto je workflow, ktorý najviac chýba leadovým biznisom. Bez neho sa algoritmus učí na počte leadov — s ním na tom, ktoré z nich naozaj zarobili:</p>
+
+  <div class="flow-scroll">
+    <div class="flow">
+      <div class="flow-step">
+        <span class="flow-ico" aria-hidden="true">📝</span>
+        <span class="flow-num">Krok 1</span>
+        <strong>Formulár na webe</strong>
+        <span class="flow-desc">meno, e-mail, telefón — a skryté pole s GCLID</span>
+      </div>
+      <div class="flow-arrow" aria-hidden="true">→</div>
+      <div class="flow-step">
+        <span class="flow-ico" aria-hidden="true">⚙️</span>
+        <span class="flow-num">Krok 2</span>
+        <strong>n8n workflow</strong>
+        <span class="flow-desc">jeden scenár, ktorý beží sám; klikanie namiesto programovania</span>
+      </div>
+      <div class="flow-arrow" aria-hidden="true">→</div>
+      <div class="flow-step">
+        <span class="flow-ico" aria-hidden="true">🗂️</span>
+        <span class="flow-num">Krok 3</span>
+        <strong>CRM a notifikácia</strong>
+        <span class="flow-desc">lead uložený, obchodník má správu na Slacku do minúty</span>
+      </div>
+      <div class="flow-arrow" aria-hidden="true">→</div>
+      <div class="flow-step">
+        <span class="flow-ico" aria-hidden="true">✅</span>
+        <span class="flow-num">Krok 4</span>
+        <strong>Obchod uzavretý</strong>
+        <span class="flow-desc">v CRM pribudne reálna hodnota zákazky</span>
+      </div>
+      <div class="flow-arrow" aria-hidden="true">→</div>
+      <div class="flow-step">
+        <span class="flow-ico" aria-hidden="true">🎯</span>
+        <span class="flow-num">Krok 5</span>
+        <strong>Offline konverzia</strong>
+        <span class="flow-desc">GCLID + hodnota späť do Google Ads</span>
+      </div>
+    </div>
+  </div>
+  <p class="small">Každý krok je v n8n jeden uzol. Rovnakým spôsobom sa dá poskladať týždenný report, synchronizácia publík aj sledovanie konkurencie.</p>
+
   <div class="callout tip">
     <strong>Zaujíma ťa niektorá z tém?</strong>
     Napíš mi, čo by ti najviac pomohlo — podľa toho skladám obsah ďalších školení. Stačí jedna veta na <a href="#kontakt">kontakt nižšie</a>.
