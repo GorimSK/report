@@ -2,6 +2,8 @@
 
 Statická stránka (HTML + CSS + JS, bez buildu) — doplnkový materiál ku školeniam na ITLearning.
 
+**Živá verzia:** https://marketing-prirucka.vercel.app
+
 ## Obsah stránky
 
 1. **Reklamná aukcia** — Ad Rank, prahy, výpočet reálnej ceny za klik, Auction Insights, paralela na Mete
@@ -21,6 +23,14 @@ python3 -m http.server 8000   # http://localhost:8000
 ```
 
 ## Nasadenie na Vercel
+
+Aktuálna živá verzia (projekt `marketing-prirucka`) bola nahraná priamo cez Vercel API,
+teda **nie je prepojená s týmto repozitárom** — zmeny v gite sa samy nenasadia.
+
+Ak chceš automatické nasadenie pri každom pushi, pripoj vo Verceli GitHub účet
+(Settings → Login Connections) a naimportuj repozitár `GorimSK/report`.
+Voči živej verzii sú v týchto súboroch navyše len komentáre v zdrojovom kóde
+a dlhší `meta description`; obsah stránky je rovnaký.
 
 Projekt je statický, žiadny build. V nastaveniach Vercel projektu:
 
