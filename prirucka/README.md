@@ -2,9 +2,9 @@
 
 Statická stránka (HTML + CSS + JS, bez buildu) — doplnkový materiál ku školeniam na ITLearning.
 
-**Živá verzia:** https://marketing-prirucka-sk.vercel.app
+**Živá verzia:** https://marketingova-prirucka-sk.vercel.app
 
-(Staršia verzia bez simulátora aukcie je ešte na https://marketing-prirucka.vercel.app)
+(Staršie verzie: marketing-prirucka.vercel.app, marketing-prirucka-sk.vercel.app)
 
 ## Obsah stránky
 
@@ -26,7 +26,7 @@ python3 -m http.server 8000   # http://localhost:8000
 
 ## Nasadenie na Vercel
 
-Aktuálna živá verzia (projekt `marketing-prirucka-sk`) bola nahraná priamo cez Vercel API,
+Aktuálna živá verzia (projekt `marketingova-prirucka-sk`) bola nahraná priamo cez Vercel API,
 teda **nie je prepojená s týmto repozitárom** — zmeny v gite sa samy nenasadia.
 Použitý prístupový token navyše vie iba zakladať nové projekty, nie nasadzovať do
 existujúcich, takže každé ďalšie nasadenie touto cestou znamená novú adresu.
