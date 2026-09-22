@@ -199,6 +199,36 @@ code{background:var(--surface-2); padding:.12em .4em; border-radius:6px; font-si
 .callout.warn{background:var(--warn-soft); border:1px solid color-mix(in srgb, var(--warn) 32%, transparent)}
 .callout.warn strong:first-child{color:var(--warn)}
 
+/* ---------- Simulátor aukcie ---------- */
+.sim{margin:24px 0}
+.sim-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(215px,1fr)); gap:12px}
+.sim-card{background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:16px; box-shadow:var(--shadow)}
+.sim-card.is-you{border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft), var(--shadow)}
+.sim-name{display:block; font-weight:700; font-size:.95rem; margin-bottom:12px}
+.sim-card.is-you .sim-name{color:var(--accent)}
+.sim-card label{display:block; font-size:.74rem; font-weight:700; color:var(--text-dim); text-transform:uppercase; letter-spacing:.07em; margin-bottom:12px}
+.sim-card label:last-child{margin-bottom:0}
+.sim-card input[type="number"]{
+  display:block; width:100%; margin-top:6px; padding:9px 10px; font-family:inherit; font-size:.98rem;
+  border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--bg); color:var(--text);
+}
+.sim-card input[type="range"]{display:block; width:100%; margin-top:8px; accent-color:var(--accent)}
+.sim-card input:focus{outline:2px solid var(--accent); outline-offset:1px}
+.sim-q-val{float:right; font-size:1rem; font-weight:800; color:var(--accent); letter-spacing:0}
+.sim-extra{display:flex; align-items:flex-end; gap:16px; flex-wrap:wrap; margin:16px 0 4px}
+.sim-extra label{font-size:.74rem; font-weight:700; color:var(--text-dim); text-transform:uppercase; letter-spacing:.07em}
+.sim-extra input{
+  display:block; width:120px; margin-top:6px; padding:8px 10px; font-family:inherit; font-size:.95rem;
+  border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--bg); color:var(--text);
+}
+.row-you{background:var(--accent-soft)}
+.row-you td{font-weight:600}
+.row-out td{color:var(--text-dim)}
+.sim-verdict{
+  margin:16px 0 0 !important; padding:14px 16px; border-radius:var(--radius-sm); font-size:.95rem; font-weight:600;
+  background:var(--accent-soft); border:1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
 /* ---------- Tables ---------- */
 .table-scroll{overflow-x:auto; margin:22px 0; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface)}
 table{border-collapse:collapse; width:100%; min-width:560px; font-size:.93rem}
