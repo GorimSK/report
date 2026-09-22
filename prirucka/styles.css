@@ -313,6 +313,11 @@ tbody tr:last-child td{border-bottom:0}
 .calc-verdict.bad{background:color-mix(in srgb, var(--bad) 12%, transparent); color:var(--bad)}
 
 /* ---------- Glossary ---------- */
+.grid-3.teaser{grid-template-columns:repeat(auto-fit,minmax(268px,1fr))}
+.teaser-card{border-top:3px solid var(--accent)}
+.teaser-card ul{margin:10px 0 0; padding-left:18px; font-size:.91rem; color:var(--text-soft)}
+.teaser-card li{margin-bottom:6px}
+
 .glossary{display:grid; grid-template-columns:repeat(auto-fit,minmax(255px,1fr)); gap:2px; margin-top:24px; background:var(--border); border:1px solid var(--border); border-radius:var(--radius); overflow:hidden}
 .glossary > div{background:var(--surface); padding:14px 16px}
 .glossary dt{font-weight:700; font-size:.95rem; margin-bottom:2px}
