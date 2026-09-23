@@ -346,6 +346,22 @@ tbody tr:last-child td{border-bottom:0}
 
 /* ---------- Contact ---------- */
 .section-contact{border-bottom:0}
+.share{
+  display:flex; align-items:center; gap:28px; margin-bottom:20px; padding:24px;
+  background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); box-shadow:var(--shadow);
+}
+.share-qr{flex:0 0 auto; width:186px; padding:10px; background:#fff; border-radius:12px; border:1px solid var(--border)}
+.qr-svg{display:block; width:100%; height:auto}
+.share-text{min-width:0}
+.share-text h3{margin:0 0 8px; font-size:1.25rem}
+.share-text p{margin:0 0 12px; font-size:.95rem; color:var(--text-soft); max-width:46ch}
+.share-url{font-weight:700}
+.share-url a{text-decoration:none; word-break:break-all}
+@media (max-width:640px){
+  .share{flex-direction:column; text-align:center; gap:20px; padding:20px}
+  .share-qr{width:200px}
+  .share-text p{margin-left:auto; margin-right:auto}
+}
 .contact-box{
   background:linear-gradient(135deg,var(--accent),#7c3aed); color:#fff;
   border-radius:24px; padding:44px 36px;

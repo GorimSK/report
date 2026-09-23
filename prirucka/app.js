@@ -143,6 +143,24 @@
   fields.forEach(function (f) { if (f) f.addEventListener('input', calc); });
   calc();
   /* ---------- Simulátor aukcie ---------- */
+  /* ---------- Kopírovanie odkazu ---------- */
+  var copyBtn = document.getElementById('copyLink');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', function () {
+      var url = location.href.split('#')[0];
+      var done = function () {
+        var original = copyBtn.textContent;
+        copyBtn.textContent = 'Skopírované ✓';
+        setTimeout(function () { copyBtn.textContent = original; }, 2000);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(url).then(done, function () { window.prompt('Skopíruj odkaz:', url); });
+      } else {
+        window.prompt('Skopíruj odkaz:', url);
+      }
+    });
+  }
+
   var simBody = document.getElementById('simBody');
   var simVerdict = document.getElementById('simVerdict');
   var simThreshold = document.getElementById('simThreshold');
