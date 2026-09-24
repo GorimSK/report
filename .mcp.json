@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "google-ads-mcp": {
+      "command": "pipx",
+      "args": [
+        "run",
+        "--spec",
+        "git+https://github.com/googleads/google-ads-mcp.git",
+        "google-ads-mcp"
+      ],
+      "env": {
+        "GOOGLE_PROJECT_ID": "YOUR_PROJECT_ID"
+      }
+    }
+  }
+}
