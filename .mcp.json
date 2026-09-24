@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "google-ads-mcp-mcc1": {
-      "command": "pipx",
+      "command": "/root/.local/bin/pipx",
       "args": [
         "run",
         "--backend",
@@ -18,7 +18,7 @@
       }
     },
     "google-ads-mcp-mcc2": {
-      "command": "pipx",
+      "command": "/root/.local/bin/pipx",
       "args": [
         "run",
         "--backend",
@@ -35,7 +35,7 @@
       }
     },
     "google-ads-mcp-mcc3": {
-      "command": "pipx",
+      "command": "/root/.local/bin/pipx",
       "args": [
         "run",
         "--backend",
