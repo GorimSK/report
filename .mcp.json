@@ -4,6 +4,8 @@
       "command": "pipx",
       "args": [
         "run",
+        "--backend",
+        "pip",
         "--spec",
         "git+https://github.com/googleads/google-ads-mcp.git",
         "google-ads-mcp"
@@ -19,6 +21,8 @@
       "command": "pipx",
       "args": [
         "run",
+        "--backend",
+        "pip",
         "--spec",
         "git+https://github.com/googleads/google-ads-mcp.git",
         "google-ads-mcp"
@@ -34,6 +38,8 @@
       "command": "pipx",
       "args": [
         "run",
+        "--backend",
+        "pip",
         "--spec",
         "git+https://github.com/googleads/google-ads-mcp.git",
         "google-ads-mcp"
