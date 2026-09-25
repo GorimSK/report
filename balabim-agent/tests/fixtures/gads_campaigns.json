@@ -1,0 +1,32 @@
+[
+  {
+    "results": [
+      {
+        "segments": { "date": "2026-09-23" },
+        "customer": { "id": "1234567891", "descriptiveName": "Balabim CZ", "currencyCode": "CZK" },
+        "campaign": {
+          "id": "501", "name": "CZ_Search_Generic", "status": "ENABLED", "advertisingChannelType": "SEARCH",
+          "biddingStrategyType": "TARGET_ROAS", "primaryStatus": "LIMITED", "primaryStatusReasons": ["BUDGET_CONSTRAINED"]
+        },
+        "campaignBudget": { "amountMicros": "4900000000" },
+        "metrics": {
+          "costMicros": "2450000000", "impressions": "12000", "clicks": "640", "conversions": 12.5,
+          "conversionsValue": 24500, "searchImpressionShare": 0.55, "searchBudgetLostImpressionShare": 0.31,
+          "searchRankLostImpressionShare": 0.14
+        }
+      }
+    ],
+    "fieldMask": "segments.date,customer.id",
+    "requestId": "abc"
+  },
+  {
+    "results": [
+      {
+        "segments": { "date": "2026-09-24" },
+        "customer": { "id": "1234567890", "descriptiveName": "Balabim SK", "currencyCode": "EUR" },
+        "campaign": { "id": "601", "name": "PMax | Feed", "status": "ENABLED", "advertisingChannelType": "PERFORMANCE_MAX" },
+        "metrics": { "costMicros": "50000000", "impressions": "3000", "clicks": "80", "conversions": 2, "conversionsValue": 210 }
+      }
+    ]
+  }
+]

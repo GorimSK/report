@@ -1,0 +1,182 @@
+{
+  "name": "Balabim PPC – WF5 Spätná väzba (Asana webhook)",
+  "nodes": [
+    {
+      "parameters": {
+        "authentication": "accessToken",
+        "resource": "REPLACE",
+        "workspace": "REPLACE"
+      },
+      "id": "084d3eae-b428-59c4-954c-0f7a0bcf38eb",
+      "name": "Asana Trigger",
+      "type": "n8n-nodes-base.asanaTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "credentials": {
+        "asanaApi": {
+          "id": "REPLACE_ME",
+          "name": "Asana"
+        }
+      },
+      "webhookId": "37673045-0be9-560e-9c0f-394216f23aea"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shared helpers. build.py prepends this file to every Code node, so keep it\n// free of top-level side effects and never redeclare these names in node code.\nconst COUNTRIES = ['SK', 'CZ', 'HU', 'PL', 'RO', 'BG', 'HR', 'SI', 'GR'];\nconst PLATFORM_LABEL = { GOOGLE_ADS: 'Google Ads', META: 'Meta Ads', BOTH: 'Google + Meta' };\n\n// Accepts numbers, API strings (\"123.45\") and sheet values (\"3,5\", \"1 200 €\").\nfunction num(v) {\n  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;\n  if (v === null || v === undefined || v === '') return 0;\n  const n = Number(String(v).replace(/[\\s€%]/g, '').replace(',', '.'));\n  return Number.isFinite(n) ? n : 0;\n}\nconst round = (v, d = 2) => Math.round(num(v) * 10 ** d) / 10 ** d;\nconst safeDiv = (a, b) => (num(b) === 0 ? null : num(a) / num(b));\nconst pct = (v) => (v === null || v === undefined ? 'n/a' : `${round(v * 100, 1)} %`);\nconst eur = (v) => `${round(v, 0).toLocaleString('sk-SK')} €`;\nconst fmt = (v, d = 2) => (v === null || v === undefined ? 'n/a' : String(round(v, d)));\nconst normId = (id) => String(id ?? '').replace(/^act_/, '').replace(/-/g, '').trim();\nconst isActive = (v) => !['FALSE', 'NIE', '0', 'NO'].includes(String(v ?? 'TRUE').trim().toUpperCase());\n\n// Country from campaign name: SK_Search_Brand, \"PMax | HU | Feed\", \"Meta-RO-Prospecting\"...\nfunction countryFromName(name) {\n  const m = String(name || '').toUpperCase().match(/(?:^|[^A-Z])(SK|CZ|HU|PL|RO|BG|HR|SI|GR)(?=[^A-Z]|$)/);\n  return m ? m[1] : 'UNKNOWN';\n}\n\n// Rows of the \"accounts\" sheet -> { 'GOOGLE_ADS|1234567890': {country, currency, name} }\nfunction buildAccountMap(items) {\n  const map = {};\n  for (const { json: r } of items) {\n    if (!isActive(r.active)) continue;\n    const platform = String(r.platform || '').trim().toUpperCase();\n    map[`${platform}|${normId(r.account_id)}`] = {\n      country: String(r.country || '').trim().toUpperCase(),\n      currency: String(r.currency || '').trim().toUpperCase(),\n      name: r.account_name || '',\n    };\n  }\n  return map;\n}\n\n// Account-level country wins; accounts marked MULTI fall back to the campaign name.\nfunction resolveCountry(accountMap, platform, accountId, campaignName) {\n  const acc = accountMap[`${platform}|${normId(accountId)}`];\n  if (acc && COUNTRIES.includes(acc.country)) return acc.country;\n  return countryFromName(campaignName);\n}\n\n// fx = Frankfurter time series response {rates: {'YYYY-MM-DD': {CZK: 24.3, ...}}}, base EUR.\n// Returns units of `currency` per 1 EUR, using the latest rate on or before `date`.\nfunction fxRate(fx, currency, date) {\n  const cur = String(currency || 'EUR').toUpperCase();\n  if (cur === 'EUR') return 1;\n  if (cur === 'BGN') return 1.95583; // fixed conversion rate, BG uses EUR since 2026-01-01\n  const rates = (fx && fx.rates) || {};\n  const dates = Object.keys(rates).sort();\n  let rate = null;\n  for (const d of dates) if (d <= date && rates[d][cur]) rate = rates[d][cur];\n  if (rate === null) for (const d of dates) if (rates[d][cur]) { rate = rates[d][cur]; break; }\n  if (!rate) throw new Error(`Chýba kurz ECB pre ${cur} k ${date}`);\n  return rate;\n}\n\n// n8n HTTP node may emit one item per array element or one item wrapping the array.\nfunction unwrap(items, key) {\n  const out = [];\n  for (const { json } of items) {\n    const parts = Array.isArray(json) ? json : [json];\n    for (const p of parts) {\n      if (p && Array.isArray(p[key])) out.push(...p[key]);\n    }\n  }\n  return out;\n}\n\n// Rule -> Asana task type (used when a task is built from a finding without AI).\nconst RULE_TYPE = {\n  TRACKING_OUTAGE: 'TRACKING', NO_DATA: 'DATA_QUALITY', UNMAPPED: 'DATA_QUALITY',\n  PACING_OVER: 'BUDGET', PACING_UNDER: 'BUDGET',\n  KPI_BELOW_TARGET: 'PERFORMANCE', KPI_WOW_DROP: 'PERFORMANCE', CAMPAIGN_DROP: 'PERFORMANCE',\n  WASTE_NO_CONV: 'WASTE', SCALE_BUDGET: 'SCALE', CREATIVE_FATIGUE: 'CREATIVE',\n  SEARCH_TERMS: 'SEARCH_TERMS', POLICY: 'POLICY', LEARNING_LIMITED: 'LEARNING',\n};\nconst PRIORITY_ORDER = { P1: 0, P2: 1, P3: 2 };\n\n// BigQuery nodes run with \"Always Output Data\", so an empty result is one empty item.\nconst rows = (items) => items.map((i) => i.json).filter((j) => j && Object.keys(j).length > 0);\n\n// Alert-ID custom field text -> Set of alert keys.\nconst parseKeys = (text) => new Set(String(text || '').split(/[\\s,;]+/).map((s) => s.trim()).filter(Boolean));\n\n// Open tasks of the Asana project (paginated HTTP output) -> [{gid, name, url, keys:Set, priority}]\nfunction openTasks(items, alertFieldGid, priorityFieldGid) {\n  return unwrap(items, 'data').map((t) => {\n    const cf = (gid) => (t.custom_fields || []).find((c) => c.gid === gid);\n    const alert = cf(alertFieldGid);\n    const prio = priorityFieldGid ? cf(priorityFieldGid) : null;\n    return {\n      gid: t.gid,\n      name: t.name,\n      url: t.permalink_url,\n      keys: parseKeys(alert && (alert.text_value ?? alert.display_value)),\n      priority: prio ? ((prio.enum_value && prio.enum_value.name) || prio.display_value || '') : '',\n    };\n  });\n}\n\n// A finding turned into a task without AI (fallback, or update of an already-open task).\nfunction taskFromFinding(f, source) {\n  return {\n    alert_keys: [f.alert_key],\n    title: f.title.slice(0, 120),\n    country: f.country,\n    platform: f.platform,\n    type: RULE_TYPE[f.rule] || 'PERFORMANCE',\n    priority: f.severity,\n    diagnosis: f.summary_line,\n    action_steps: f.suggested_steps || [],\n    expected_impact: '',\n    expected_impact_eur: 0,\n    campaign_id: f.campaign_id || '',\n    source,\n    findings: [f],\n  };\n}\n\n// ---- wf5_filter_events.js ----\n// Asana webhook events -> unique task gids whose \"completed\" field changed.\nconst gids = new Set();\nfor (const { json: e } of $input.all()) {\n  const events = Array.isArray(e.events) ? e.events : [e];\n  for (const ev of events) {\n    if (ev && ev.resource && ev.resource.resource_type === 'task'\n        && ev.action === 'changed' && ev.change && ev.change.field === 'completed') {\n      gids.add(String(ev.resource.gid));\n    }\n  }\n}\nreturn [...gids].map((gid) => ({ json: { task_gid: gid } }));\n"
+      },
+      "id": "d14a5fcb-58a3-58b6-b847-3a93c18d166e",
+      "name": "Completed Events",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        280,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://app.asana.com/api/1.0/tasks/{{ $json.task_gid }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "asanaApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "opt_fields",
+              "value": "name,completed,completed_at,completed_by.name"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "b9e5f7eb-d3a6-5f52-86ea-8cc8b70a7d5c",
+      "name": "Get Task",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        0
+      ],
+      "credentials": {
+        "asanaApi": {
+          "id": "REPLACE_ME",
+          "name": "Asana"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shared helpers. build.py prepends this file to every Code node, so keep it\n// free of top-level side effects and never redeclare these names in node code.\nconst COUNTRIES = ['SK', 'CZ', 'HU', 'PL', 'RO', 'BG', 'HR', 'SI', 'GR'];\nconst PLATFORM_LABEL = { GOOGLE_ADS: 'Google Ads', META: 'Meta Ads', BOTH: 'Google + Meta' };\n\n// Accepts numbers, API strings (\"123.45\") and sheet values (\"3,5\", \"1 200 €\").\nfunction num(v) {\n  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;\n  if (v === null || v === undefined || v === '') return 0;\n  const n = Number(String(v).replace(/[\\s€%]/g, '').replace(',', '.'));\n  return Number.isFinite(n) ? n : 0;\n}\nconst round = (v, d = 2) => Math.round(num(v) * 10 ** d) / 10 ** d;\nconst safeDiv = (a, b) => (num(b) === 0 ? null : num(a) / num(b));\nconst pct = (v) => (v === null || v === undefined ? 'n/a' : `${round(v * 100, 1)} %`);\nconst eur = (v) => `${round(v, 0).toLocaleString('sk-SK')} €`;\nconst fmt = (v, d = 2) => (v === null || v === undefined ? 'n/a' : String(round(v, d)));\nconst normId = (id) => String(id ?? '').replace(/^act_/, '').replace(/-/g, '').trim();\nconst isActive = (v) => !['FALSE', 'NIE', '0', 'NO'].includes(String(v ?? 'TRUE').trim().toUpperCase());\n\n// Country from campaign name: SK_Search_Brand, \"PMax | HU | Feed\", \"Meta-RO-Prospecting\"...\nfunction countryFromName(name) {\n  const m = String(name || '').toUpperCase().match(/(?:^|[^A-Z])(SK|CZ|HU|PL|RO|BG|HR|SI|GR)(?=[^A-Z]|$)/);\n  return m ? m[1] : 'UNKNOWN';\n}\n\n// Rows of the \"accounts\" sheet -> { 'GOOGLE_ADS|1234567890': {country, currency, name} }\nfunction buildAccountMap(items) {\n  const map = {};\n  for (const { json: r } of items) {\n    if (!isActive(r.active)) continue;\n    const platform = String(r.platform || '').trim().toUpperCase();\n    map[`${platform}|${normId(r.account_id)}`] = {\n      country: String(r.country || '').trim().toUpperCase(),\n      currency: String(r.currency || '').trim().toUpperCase(),\n      name: r.account_name || '',\n    };\n  }\n  return map;\n}\n\n// Account-level country wins; accounts marked MULTI fall back to the campaign name.\nfunction resolveCountry(accountMap, platform, accountId, campaignName) {\n  const acc = accountMap[`${platform}|${normId(accountId)}`];\n  if (acc && COUNTRIES.includes(acc.country)) return acc.country;\n  return countryFromName(campaignName);\n}\n\n// fx = Frankfurter time series response {rates: {'YYYY-MM-DD': {CZK: 24.3, ...}}}, base EUR.\n// Returns units of `currency` per 1 EUR, using the latest rate on or before `date`.\nfunction fxRate(fx, currency, date) {\n  const cur = String(currency || 'EUR').toUpperCase();\n  if (cur === 'EUR') return 1;\n  if (cur === 'BGN') return 1.95583; // fixed conversion rate, BG uses EUR since 2026-01-01\n  const rates = (fx && fx.rates) || {};\n  const dates = Object.keys(rates).sort();\n  let rate = null;\n  for (const d of dates) if (d <= date && rates[d][cur]) rate = rates[d][cur];\n  if (rate === null) for (const d of dates) if (rates[d][cur]) { rate = rates[d][cur]; break; }\n  if (!rate) throw new Error(`Chýba kurz ECB pre ${cur} k ${date}`);\n  return rate;\n}\n\n// n8n HTTP node may emit one item per array element or one item wrapping the array.\nfunction unwrap(items, key) {\n  const out = [];\n  for (const { json } of items) {\n    const parts = Array.isArray(json) ? json : [json];\n    for (const p of parts) {\n      if (p && Array.isArray(p[key])) out.push(...p[key]);\n    }\n  }\n  return out;\n}\n\n// Rule -> Asana task type (used when a task is built from a finding without AI).\nconst RULE_TYPE = {\n  TRACKING_OUTAGE: 'TRACKING', NO_DATA: 'DATA_QUALITY', UNMAPPED: 'DATA_QUALITY',\n  PACING_OVER: 'BUDGET', PACING_UNDER: 'BUDGET',\n  KPI_BELOW_TARGET: 'PERFORMANCE', KPI_WOW_DROP: 'PERFORMANCE', CAMPAIGN_DROP: 'PERFORMANCE',\n  WASTE_NO_CONV: 'WASTE', SCALE_BUDGET: 'SCALE', CREATIVE_FATIGUE: 'CREATIVE',\n  SEARCH_TERMS: 'SEARCH_TERMS', POLICY: 'POLICY', LEARNING_LIMITED: 'LEARNING',\n};\nconst PRIORITY_ORDER = { P1: 0, P2: 1, P3: 2 };\n\n// BigQuery nodes run with \"Always Output Data\", so an empty result is one empty item.\nconst rows = (items) => items.map((i) => i.json).filter((j) => j && Object.keys(j).length > 0);\n\n// Alert-ID custom field text -> Set of alert keys.\nconst parseKeys = (text) => new Set(String(text || '').split(/[\\s,;]+/).map((s) => s.trim()).filter(Boolean));\n\n// Open tasks of the Asana project (paginated HTTP output) -> [{gid, name, url, keys:Set, priority}]\nfunction openTasks(items, alertFieldGid, priorityFieldGid) {\n  return unwrap(items, 'data').map((t) => {\n    const cf = (gid) => (t.custom_fields || []).find((c) => c.gid === gid);\n    const alert = cf(alertFieldGid);\n    const prio = priorityFieldGid ? cf(priorityFieldGid) : null;\n    return {\n      gid: t.gid,\n      name: t.name,\n      url: t.permalink_url,\n      keys: parseKeys(alert && (alert.text_value ?? alert.display_value)),\n      priority: prio ? ((prio.enum_value && prio.enum_value.name) || prio.display_value || '') : '',\n    };\n  });\n}\n\n// A finding turned into a task without AI (fallback, or update of an already-open task).\nfunction taskFromFinding(f, source) {\n  return {\n    alert_keys: [f.alert_key],\n    title: f.title.slice(0, 120),\n    country: f.country,\n    platform: f.platform,\n    type: RULE_TYPE[f.rule] || 'PERFORMANCE',\n    priority: f.severity,\n    diagnosis: f.summary_line,\n    action_steps: f.suggested_steps || [],\n    expected_impact: '',\n    expected_impact_eur: 0,\n    campaign_id: f.campaign_id || '',\n    source,\n    findings: [f],\n  };\n}\n\n// ---- wf5_to_actions_log.js ----\n// Asana task detail -> actions_log row, only for tasks that are now completed.\nconst logged = new Date().toISOString();\nreturn $input.all()\n  .map((i) => i.json.data || i.json)\n  .filter((t) => t && t.completed)\n  .map((t) => ({\n    json: {\n      task_gid: String(t.gid),\n      completed_at: t.completed_at,\n      completed_by: (t.completed_by && t.completed_by.name) || '',\n      task_name: t.name || '',\n      logged_at: logged,\n    },\n  }));\n"
+      },
+      "id": "c94a0840-3908-5e0c-b523-a18acd90fb0a",
+      "name": "To actions_log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        840,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "insert",
+        "projectId": {
+          "__rl": true,
+          "value": "YOUR_GCP_PROJECT",
+          "mode": "id"
+        },
+        "datasetId": {
+          "__rl": true,
+          "value": "balabim_ads",
+          "mode": "id"
+        },
+        "tableId": {
+          "__rl": true,
+          "value": "actions_log",
+          "mode": "id"
+        },
+        "dataMode": "autoMap",
+        "options": {}
+      },
+      "id": "a36b2ded-2336-5583-b835-100c8193ac0a",
+      "name": "BQ actions_log",
+      "type": "n8n-nodes-base.googleBigQuery",
+      "typeVersion": 2.1,
+      "position": [
+        1120,
+        0
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "REPLACE_ME",
+          "name": "Google Service Account (BigQuery + Sheets)"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Asana Trigger": {
+      "main": [
+        [
+          {
+            "node": "Completed Events",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Completed Events": {
+      "main": [
+        [
+          {
+            "node": "Get Task",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Task": {
+      "main": [
+        [
+          {
+            "node": "To actions_log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "To actions_log": {
+      "main": [
+        [
+          {
+            "node": "BQ actions_log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Bratislava",
+    "saveManualExecutions": true
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}

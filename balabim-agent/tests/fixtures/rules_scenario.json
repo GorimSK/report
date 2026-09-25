@@ -1,0 +1,34 @@
+{
+  "perf": [
+    { "level": "country", "platform": "GOOGLE_ADS", "country": "SK", "scope_id": "ALL", "scope_name": "SK",
+      "cost_1d": 100, "conv_1d": 0, "value_1d": 0, "conv_avg_b7": 10,
+      "cost_7d": 700, "conv_7d": 50, "value_7d": 1400, "clicks_7d": 2000, "impr_7d": 50000,
+      "cost_p7": 700, "conv_p7": 60, "value_p7": 2800, "clicks_p7": 2100, "impr_p7": 52000,
+      "cost_mtd": 2500, "conv_mtd": 150, "value_mtd": 6000, "run_date": "2026-09-20", "days_elapsed": 20, "days_in_month": 30 },
+    { "level": "country", "platform": "GOOGLE_ADS", "country": "CZ", "scope_id": "ALL", "scope_name": "CZ",
+      "cost_1d": 140, "conv_1d": 9, "value_1d": 700, "conv_avg_b7": 8,
+      "cost_7d": 1000, "conv_7d": 60, "value_7d": 5000, "cost_p7": 900, "conv_p7": 50, "value_p7": 4200,
+      "cost_mtd": 1300, "run_date": "2026-09-20", "days_elapsed": 20, "days_in_month": 30 },
+    { "level": "country", "platform": "GOOGLE_ADS", "country": "UNKNOWN", "scope_id": "ALL", "scope_name": "UNKNOWN",
+      "cost_1d": 8, "cost_7d": 55, "run_date": "2026-09-20", "days_elapsed": 20, "days_in_month": 30 },
+    { "level": "country", "platform": "META", "country": "HU", "scope_id": "ALL", "scope_name": "HU",
+      "cost_1d": 30, "conv_1d": 1, "conv_avg_b7": 1, "cost_7d": 200, "conv_7d": 6, "value_7d": 700,
+      "cost_p7": 150, "conv_p7": 3, "value_p7": 500, "cost_mtd": 600, "run_date": "2026-09-20", "days_elapsed": 20, "days_in_month": 30 },
+    { "level": "campaign", "platform": "GOOGLE_ADS", "country": "SK", "scope_id": "c-waste", "scope_name": "SK_Search_Generic_Test",
+      "cost_7d": 80, "conv_7d": 0, "value_7d": 0, "cost_p7": 20, "conv_p7": 0, "value_p7": 0, "run_date": "2026-09-20" },
+    { "level": "campaign", "platform": "GOOGLE_ADS", "country": "SK", "scope_id": "c-main", "scope_name": "SK_PMax",
+      "cost_7d": 620, "conv_7d": 50, "value_7d": 1400, "cost_p7": 680, "conv_p7": 60, "value_p7": 2800, "lost_is_budget_7d": null, "run_date": "2026-09-20" },
+    { "level": "campaign", "platform": "GOOGLE_ADS", "country": "CZ", "scope_id": "c-cz", "scope_name": "CZ_Search_Generic",
+      "cost_7d": 1000, "conv_7d": 60, "value_7d": 5000, "cost_p7": 900, "conv_p7": 50, "value_p7": 4200, "lost_is_budget_7d": 0.3, "run_date": "2026-09-20" }
+  ],
+  "search_terms": [
+    { "country": "SK", "campaign_name": "SK_Search_Generic", "search_term": "balabim reklamácia", "cost_eur": 20, "clicks": 14, "conversions": 0 },
+    { "country": "SK", "campaign_name": "SK_Search_Generic", "search_term": "hračky zadarmo", "cost_eur": 16, "clicks": 20, "conversions": 0 },
+    { "country": "SK", "campaign_name": "SK_Search_Generic", "search_term": "lacné hračky", "cost_eur": 5, "clicks": 4, "conversions": 0 },
+    { "country": "CZ", "campaign_name": "CZ_Search_Generic", "search_term": "hračky bazar", "cost_eur": 30, "clicks": 25, "conversions": 0 }
+  ],
+  "issues": [
+    { "platform": "GOOGLE_ADS", "country": "SK", "entity_level": "AD", "entity_id": "77", "entity_name": "RSA 1",
+      "campaign_id": "c-main", "campaign_name": "SK_Search_Brand", "issue": "DISAPPROVED", "detail": "Ad group: Brand" }
+  ]
+}

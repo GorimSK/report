@@ -1,0 +1,26 @@
+{
+  "data": [
+    {
+      "date_start": "2026-09-24", "date_stop": "2026-09-24",
+      "account_id": "1000000000000001", "account_name": "Balabim", "account_currency": "EUR",
+      "campaign_id": "9001", "campaign_name": "HU_Prospecting_Conv", "adset_id": "111", "adset_name": "HU | Broad",
+      "objective": "OUTCOME_SALES", "spend": "120.50", "impressions": "15000", "reach": "9000", "inline_link_clicks": "30",
+      "actions": [
+        { "action_type": "link_click", "value": "30" },
+        { "action_type": "purchase", "value": "4" },
+        { "action_type": "omni_purchase", "value": "4" }
+      ],
+      "action_values": [
+        { "action_type": "purchase", "value": "400" },
+        { "action_type": "omni_purchase", "value": "400" }
+      ]
+    },
+    {
+      "date_start": "2026-09-24", "date_stop": "2026-09-24",
+      "account_id": "1000000000000001", "account_name": "Balabim", "account_currency": "EUR",
+      "campaign_id": "9002", "campaign_name": "Balabim | RO | Retargeting", "adset_id": "222", "adset_name": "RO | Visitors 30d",
+      "spend": "40", "impressions": "5000", "reach": "2000", "inline_link_clicks": "12"
+    }
+  ],
+  "paging": { "cursors": { "before": "a", "after": "b" } }
+}

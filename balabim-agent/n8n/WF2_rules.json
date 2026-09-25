@@ -1,0 +1,394 @@
+{
+  "name": "Balabim PPC – WF2 Pravidlá a detekcia",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 7 * * *"
+            }
+          ]
+        }
+      },
+      "id": "6b1811c2-f569-5f71-bdb1-4588ba952c16",
+      "name": "Každý deň 07:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shared helpers. build.py prepends this file to every Code node, so keep it\n// free of top-level side effects and never redeclare these names in node code.\nconst COUNTRIES = ['SK', 'CZ', 'HU', 'PL', 'RO', 'BG', 'HR', 'SI', 'GR'];\nconst PLATFORM_LABEL = { GOOGLE_ADS: 'Google Ads', META: 'Meta Ads', BOTH: 'Google + Meta' };\n\n// Accepts numbers, API strings (\"123.45\") and sheet values (\"3,5\", \"1 200 €\").\nfunction num(v) {\n  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;\n  if (v === null || v === undefined || v === '') return 0;\n  const n = Number(String(v).replace(/[\\s€%]/g, '').replace(',', '.'));\n  return Number.isFinite(n) ? n : 0;\n}\nconst round = (v, d = 2) => Math.round(num(v) * 10 ** d) / 10 ** d;\nconst safeDiv = (a, b) => (num(b) === 0 ? null : num(a) / num(b));\nconst pct = (v) => (v === null || v === undefined ? 'n/a' : `${round(v * 100, 1)} %`);\nconst eur = (v) => `${round(v, 0).toLocaleString('sk-SK')} €`;\nconst fmt = (v, d = 2) => (v === null || v === undefined ? 'n/a' : String(round(v, d)));\nconst normId = (id) => String(id ?? '').replace(/^act_/, '').replace(/-/g, '').trim();\nconst isActive = (v) => !['FALSE', 'NIE', '0', 'NO'].includes(String(v ?? 'TRUE').trim().toUpperCase());\n\n// Country from campaign name: SK_Search_Brand, \"PMax | HU | Feed\", \"Meta-RO-Prospecting\"...\nfunction countryFromName(name) {\n  const m = String(name || '').toUpperCase().match(/(?:^|[^A-Z])(SK|CZ|HU|PL|RO|BG|HR|SI|GR)(?=[^A-Z]|$)/);\n  return m ? m[1] : 'UNKNOWN';\n}\n\n// Rows of the \"accounts\" sheet -> { 'GOOGLE_ADS|1234567890': {country, currency, name} }\nfunction buildAccountMap(items) {\n  const map = {};\n  for (const { json: r } of items) {\n    if (!isActive(r.active)) continue;\n    const platform = String(r.platform || '').trim().toUpperCase();\n    map[`${platform}|${normId(r.account_id)}`] = {\n      country: String(r.country || '').trim().toUpperCase(),\n      currency: String(r.currency || '').trim().toUpperCase(),\n      name: r.account_name || '',\n    };\n  }\n  return map;\n}\n\n// Account-level country wins; accounts marked MULTI fall back to the campaign name.\nfunction resolveCountry(accountMap, platform, accountId, campaignName) {\n  const acc = accountMap[`${platform}|${normId(accountId)}`];\n  if (acc && COUNTRIES.includes(acc.country)) return acc.country;\n  return countryFromName(campaignName);\n}\n\n// fx = Frankfurter time series response {rates: {'YYYY-MM-DD': {CZK: 24.3, ...}}}, base EUR.\n// Returns units of `currency` per 1 EUR, using the latest rate on or before `date`.\nfunction fxRate(fx, currency, date) {\n  const cur = String(currency || 'EUR').toUpperCase();\n  if (cur === 'EUR') return 1;\n  if (cur === 'BGN') return 1.95583; // fixed conversion rate, BG uses EUR since 2026-01-01\n  const rates = (fx && fx.rates) || {};\n  const dates = Object.keys(rates).sort();\n  let rate = null;\n  for (const d of dates) if (d <= date && rates[d][cur]) rate = rates[d][cur];\n  if (rate === null) for (const d of dates) if (rates[d][cur]) { rate = rates[d][cur]; break; }\n  if (!rate) throw new Error(`Chýba kurz ECB pre ${cur} k ${date}`);\n  return rate;\n}\n\n// n8n HTTP node may emit one item per array element or one item wrapping the array.\nfunction unwrap(items, key) {\n  const out = [];\n  for (const { json } of items) {\n    const parts = Array.isArray(json) ? json : [json];\n    for (const p of parts) {\n      if (p && Array.isArray(p[key])) out.push(...p[key]);\n    }\n  }\n  return out;\n}\n\n// Rule -> Asana task type (used when a task is built from a finding without AI).\nconst RULE_TYPE = {\n  TRACKING_OUTAGE: 'TRACKING', NO_DATA: 'DATA_QUALITY', UNMAPPED: 'DATA_QUALITY',\n  PACING_OVER: 'BUDGET', PACING_UNDER: 'BUDGET',\n  KPI_BELOW_TARGET: 'PERFORMANCE', KPI_WOW_DROP: 'PERFORMANCE', CAMPAIGN_DROP: 'PERFORMANCE',\n  WASTE_NO_CONV: 'WASTE', SCALE_BUDGET: 'SCALE', CREATIVE_FATIGUE: 'CREATIVE',\n  SEARCH_TERMS: 'SEARCH_TERMS', POLICY: 'POLICY', LEARNING_LIMITED: 'LEARNING',\n};\nconst PRIORITY_ORDER = { P1: 0, P2: 1, P3: 2 };\n\n// BigQuery nodes run with \"Always Output Data\", so an empty result is one empty item.\nconst rows = (items) => items.map((i) => i.json).filter((j) => j && Object.keys(j).length > 0);\n\n// Alert-ID custom field text -> Set of alert keys.\nconst parseKeys = (text) => new Set(String(text || '').split(/[\\s,;]+/).map((s) => s.trim()).filter(Boolean));\n\n// Open tasks of the Asana project (paginated HTTP output) -> [{gid, name, url, keys:Set, priority}]\nfunction openTasks(items, alertFieldGid, priorityFieldGid) {\n  return unwrap(items, 'data').map((t) => {\n    const cf = (gid) => (t.custom_fields || []).find((c) => c.gid === gid);\n    const alert = cf(alertFieldGid);\n    const prio = priorityFieldGid ? cf(priorityFieldGid) : null;\n    return {\n      gid: t.gid,\n      name: t.name,\n      url: t.permalink_url,\n      keys: parseKeys(alert && (alert.text_value ?? alert.display_value)),\n      priority: prio ? ((prio.enum_value && prio.enum_value.name) || prio.display_value || '') : '',\n    };\n  });\n}\n\n// A finding turned into a task without AI (fallback, or update of an already-open task).\nfunction taskFromFinding(f, source) {\n  return {\n    alert_keys: [f.alert_key],\n    title: f.title.slice(0, 120),\n    country: f.country,\n    platform: f.platform,\n    type: RULE_TYPE[f.rule] || 'PERFORMANCE',\n    priority: f.severity,\n    diagnosis: f.summary_line,\n    action_steps: f.suggested_steps || [],\n    expected_impact: '',\n    expected_impact_eur: 0,\n    campaign_id: f.campaign_id || '',\n    source,\n    findings: [f],\n  };\n}\n\n// ---- config_basic.js ----\n// Settings injected by build.py (config/settings*.json).\nconst S = {\n  \"timezone\": \"Europe/Bratislava\",\n  \"gcp_project\": \"YOUR_GCP_PROJECT\",\n  \"bq_dataset\": \"balabim_ads\",\n  \"bq_location\": \"EU\",\n  \"config_sheet_id\": \"YOUR_GOOGLE_SHEET_ID\",\n  \"gads_api_version\": \"v21\",\n  \"gads_login_customer_id\": \"1234567890\",\n  \"meta_api_version\": \"v23.0\",\n  \"meta_purchase_action_types\": [\n    \"omni_purchase\",\n    \"purchase\",\n    \"offsite_conversion.fb_pixel_purchase\"\n  ],\n  \"lookback_days\": 7,\n  \"search_terms_lookback_days\": 30,\n  \"anthropic_model\": \"claude-opus-5\",\n  \"anthropic_effort\": \"medium\",\n  \"max_new_tasks_per_run\": 10,\n  \"alert_email_from\": \"n8n@your-agency.sk\",\n  \"alert_email_to\": \"ppc@your-agency.sk\",\n  \"workflow_ids\": {\n    \"wf3_analyst\": \"REPLACE_AFTER_IMPORT\",\n    \"wf4_asana\": \"REPLACE_AFTER_IMPORT\",\n    \"error\": \"REPLACE_AFTER_IMPORT\"\n  },\n  \"rule_defaults\": {\n    \"pacing_tolerance\": 0.15,\n    \"pacing_min_days\": 5,\n    \"kpi_tolerance\": 0.15,\n    \"wow_drop\": 0.25,\n    \"wow_min_conv\": 5,\n    \"min_spend_7d_eur\": 100,\n    \"min_spend_campaign_7d_eur\": 50,\n    \"max_frequency\": 3.0,\n    \"outage_min_daily_conv\": 3,\n    \"outage_drop\": 0.7,\n    \"scale_lost_is_budget\": 0.2,\n    \"scale_min_conv\": 3,\n    \"search_term_min_cost_eur\": 15\n  },\n  \"asana\": {\n    \"workspace_gid\": \"REPLACE\",\n    \"project_gid\": \"REPLACE\",\n    \"section_new_gid\": \"REPLACE\",\n    \"default_assignee_gid\": \"\",\n    \"due_days\": {\n      \"P1\": 1,\n      \"P2\": 3,\n      \"P3\": 7\n    },\n    \"fields\": {\n      \"country\": {\n        \"gid\": \"REPLACE\",\n        \"options\": {\n          \"SK\": \"\",\n          \"CZ\": \"\",\n          \"HU\": \"\",\n          \"PL\": \"\",\n          \"RO\": \"\",\n          \"BG\": \"\",\n          \"HR\": \"\",\n          \"SI\": \"\",\n          \"GR\": \"\",\n          \"ALL\": \"\"\n        }\n      },\n      \"platform\": {\n        \"gid\": \"REPLACE\",\n        \"options\": {\n          \"GOOGLE_ADS\": \"\",\n          \"META\": \"\",\n          \"BOTH\": \"\"\n        }\n      },\n      \"type\": {\n        \"gid\": \"REPLACE\",\n        \"options\": {\n          \"TRACKING\": \"\",\n          \"BUDGET\": \"\",\n          \"PERFORMANCE\": \"\",\n          \"WASTE\": \"\",\n          \"SCALE\": \"\",\n          \"CREATIVE\": \"\",\n          \"SEARCH_TERMS\": \"\",\n          \"POLICY\": \"\",\n          \"LEARNING\": \"\",\n          \"DATA_QUALITY\": \"\"\n        }\n      },\n      \"priority\": {\n        \"gid\": \"REPLACE\",\n        \"options\": {\n          \"P1\": \"\",\n          \"P2\": \"\",\n          \"P3\": \"\"\n        }\n      },\n      \"alert_id\": {\n        \"gid\": \"REPLACE\"\n      },\n      \"impact\": {\n        \"gid\": \"REPLACE\"\n      }\n    }\n  }\n};\nreturn [{ json: { ...S, today: $today.toISODate(), yesterday: $today.minus({ days: 1 }).toISODate() } }];\n"
+      },
+      "id": "8fd75165-81c6-5622-b7c8-48e664e666ea",
+      "name": "Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        280,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "targets",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "2595097e-04b7-56f8-8fe1-cd7b9a299d36",
+      "name": "Targets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        560,
+        0
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "REPLACE_ME",
+          "name": "Google Service Account (BigQuery + Sheets)"
+        }
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "executeQuery",
+        "projectId": {
+          "__rl": true,
+          "value": "YOUR_GCP_PROJECT",
+          "mode": "id"
+        },
+        "sqlQuery": "-- WF2: agregované metriky pre pravidlá. d = včerajšok (Europe/Bratislava).\n-- Okná: 1d = d, 7d = d-6..d, p7 = d-13..d-7, b7 = d-7..d-1 (7 dní pred včerajškom, pre outage), mtd = 1. deň mesiaca..d.\n-- Úrovne: country (platforma × krajina), campaign, adset (len Meta).\nWITH p AS (\n  SELECT DATE_SUB(CURRENT_DATE('Europe/Bratislava'), INTERVAL 1 DAY) AS d\n),\nbase AS (\n  SELECT f.*, p.d\n  FROM `YOUR_GCP_PROJECT.balabim_ads.v_daily_perf` f\n  CROSS JOIN p\n  WHERE f.date BETWEEN LEAST(DATE_SUB(p.d, INTERVAL 13 DAY), DATE_TRUNC(p.d, MONTH)) AND p.d\n),\ntagged AS (\n  SELECT *,\n    date = d AS w1,\n    date BETWEEN DATE_SUB(d, INTERVAL 6 DAY) AND d AS w7,\n    date BETWEEN DATE_SUB(d, INTERVAL 13 DAY) AND DATE_SUB(d, INTERVAL 7 DAY) AS wp7,\n    date BETWEEN DATE_SUB(d, INTERVAL 7 DAY) AND DATE_SUB(d, INTERVAL 1 DAY) AS wb7,\n    date >= DATE_TRUNC(d, MONTH) AS wmtd\n  FROM base\n),\nmetrics AS (\n  SELECT\n    level, platform, country, scope_id,\n    ANY_VALUE(scope_name) AS scope_name,\n    ANY_VALUE(campaign_id) AS campaign_id,\n    ANY_VALUE(campaign_name) AS campaign_name,\n    MAX(IF(w1, campaign_status, NULL)) AS campaign_status,\n    MAX(IF(w1, primary_status, NULL)) AS primary_status,\n    MAX(IF(w1, bidding_strategy, NULL)) AS bidding_strategy,\n    SUM(IF(w1, cost_eur, 0)) AS cost_1d,\n    SUM(IF(w1, conversions, 0)) AS conv_1d,\n    SUM(IF(w1, conv_value_eur, 0)) AS value_1d,\n    SUM(IF(w7, cost_eur, 0)) AS cost_7d,\n    SUM(IF(w7, conversions, 0)) AS conv_7d,\n    SUM(IF(w7, conv_value_eur, 0)) AS value_7d,\n    SUM(IF(w7, clicks, 0)) AS clicks_7d,\n    SUM(IF(w7, impressions, 0)) AS impr_7d,\n    SUM(IF(wp7, cost_eur, 0)) AS cost_p7,\n    SUM(IF(wp7, conversions, 0)) AS conv_p7,\n    SUM(IF(wp7, conv_value_eur, 0)) AS value_p7,\n    SUM(IF(wp7, clicks, 0)) AS clicks_p7,\n    SUM(IF(wp7, impressions, 0)) AS impr_p7,\n    SUM(IF(wb7, conversions, 0)) / 7 AS conv_avg_b7,\n    SUM(IF(wmtd, cost_eur, 0)) AS cost_mtd,\n    SUM(IF(wmtd, conversions, 0)) AS conv_mtd,\n    SUM(IF(wmtd, conv_value_eur, 0)) AS value_mtd,\n    AVG(IF(w7, search_lost_is_budget, NULL)) AS lost_is_budget_7d,\n    AVG(IF(w7, search_lost_is_rank, NULL)) AS lost_is_rank_7d,\n    AVG(IF(w7, search_is, NULL)) AS search_is_7d,\n    ANY_VALUE(d) AS run_date\n  FROM (\n    SELECT 'country' AS level, platform, country, 'ALL' AS scope_id, country AS scope_name, * EXCEPT (platform, country) FROM tagged\n    UNION ALL\n    SELECT 'campaign', platform, country, campaign_id, campaign_name, * EXCEPT (platform, country) FROM tagged\n    UNION ALL\n    SELECT 'adset', platform, country, adset_id, adset_name, * EXCEPT (platform, country) FROM tagged WHERE platform = 'META' AND adset_id IS NOT NULL\n  )\n  GROUP BY level, platform, country, scope_id\n)\nSELECT\n  *,\n  EXTRACT(DAY FROM run_date) AS days_elapsed,\n  EXTRACT(DAY FROM LAST_DAY(run_date)) AS days_in_month\nFROM metrics\nWHERE cost_7d > 0 OR cost_p7 > 0 OR cost_mtd > 0\nORDER BY level, platform, country, cost_7d DESC\n",
+        "options": {
+          "location": "EU"
+        }
+      },
+      "id": "5063a6ab-4c7c-5631-ae76-19518386dce0",
+      "name": "BQ Perf",
+      "type": "n8n-nodes-base.googleBigQuery",
+      "typeVersion": 2.1,
+      "position": [
+        840,
+        0
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "REPLACE_ME",
+          "name": "Google Service Account (BigQuery + Sheets)"
+        }
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "executeQuery",
+        "projectId": {
+          "__rl": true,
+          "value": "YOUR_GCP_PROJECT",
+          "mode": "id"
+        },
+        "sqlQuery": "-- WF2: search termy bez konverzií z posledného snapshotu (okno podľa settings.search_terms_lookback_days).\nWITH latest AS (\n  SELECT MAX(snapshot_date) AS s FROM `YOUR_GCP_PROJECT.balabim_ads.search_terms`\n),\ndedup AS (\n  SELECT t.* EXCEPT (rn) FROM (\n    SELECT *, ROW_NUMBER() OVER (\n      PARTITION BY account_id, campaign_id, ad_group_id, search_term ORDER BY ingested_at DESC\n    ) AS rn\n    FROM `YOUR_GCP_PROJECT.balabim_ads.search_terms`\n    WHERE snapshot_date = (SELECT s FROM latest)\n  ) t\n  WHERE rn = 1\n)\nSELECT\n  country, campaign_id, campaign_name, ad_group_name, search_term,\n  ROUND(cost_eur, 2) AS cost_eur, clicks, conversions, snapshot_date, period_start\nFROM dedup\nWHERE conversions = 0\nORDER BY country, cost_eur DESC\n",
+        "options": {
+          "location": "EU"
+        }
+      },
+      "id": "6ec3ddea-23a3-5e33-976a-b30f1bac806d",
+      "name": "BQ Search Terms",
+      "type": "n8n-nodes-base.googleBigQuery",
+      "typeVersion": 2.1,
+      "position": [
+        1120,
+        0
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "REPLACE_ME",
+          "name": "Google Service Account (BigQuery + Sheets)"
+        }
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "executeQuery",
+        "projectId": {
+          "__rl": true,
+          "value": "YOUR_GCP_PROJECT",
+          "mode": "id"
+        },
+        "sqlQuery": "-- WF2: zamietnuté reklamy a ad sety s obmedzeným učením z posledného snapshotu.\nWITH latest AS (\n  SELECT platform, MAX(snapshot_date) AS s FROM `YOUR_GCP_PROJECT.balabim_ads.entity_issues` GROUP BY platform\n)\nSELECT DISTINCT\n  i.platform, i.country, i.entity_level, i.entity_id, i.entity_name,\n  i.campaign_id, i.campaign_name, i.issue, i.detail, i.snapshot_date\nFROM `YOUR_GCP_PROJECT.balabim_ads.entity_issues` i\nJOIN latest l ON l.platform = i.platform AND l.s = i.snapshot_date\nWHERE i.snapshot_date >= DATE_SUB(CURRENT_DATE('Europe/Bratislava'), INTERVAL 2 DAY)\nORDER BY i.platform, i.country, i.issue\n",
+        "options": {
+          "location": "EU"
+        }
+      },
+      "id": "cd00dff0-5f29-54b3-8d7b-072a3756494d",
+      "name": "BQ Issues",
+      "type": "n8n-nodes-base.googleBigQuery",
+      "typeVersion": 2.1,
+      "position": [
+        1400,
+        0
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "REPLACE_ME",
+          "name": "Google Service Account (BigQuery + Sheets)"
+        }
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "executeQuery",
+        "projectId": {
+          "__rl": true,
+          "value": "YOUR_GCP_PROJECT",
+          "mode": "id"
+        },
+        "sqlQuery": "-- WF2: 7-dňová frekvencia Meta ad setov z posledného snapshotu.\nWITH latest AS (\n  SELECT MAX(snapshot_date) AS s FROM `YOUR_GCP_PROJECT.balabim_ads.meta_adset_7d`\n)\nSELECT * EXCEPT (rn) FROM (\n  SELECT m.*, ROW_NUMBER() OVER (PARTITION BY adset_id ORDER BY ingested_at DESC) AS rn\n  FROM `YOUR_GCP_PROJECT.balabim_ads.meta_adset_7d` m\n  WHERE snapshot_date = (SELECT s FROM latest)\n    AND snapshot_date >= DATE_SUB(CURRENT_DATE('Europe/Bratislava'), INTERVAL 2 DAY)\n)\nWHERE rn = 1\nORDER BY spend_eur DESC\n",
+        "options": {
+          "location": "EU"
+        }
+      },
+      "id": "1394d355-789a-50fa-b282-8ddf46b54ca8",
+      "name": "BQ Meta Freq",
+      "type": "n8n-nodes-base.googleBigQuery",
+      "typeVersion": 2.1,
+      "position": [
+        1680,
+        0
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "REPLACE_ME",
+          "name": "Google Service Account (BigQuery + Sheets)"
+        }
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shared helpers. build.py prepends this file to every Code node, so keep it\n// free of top-level side effects and never redeclare these names in node code.\nconst COUNTRIES = ['SK', 'CZ', 'HU', 'PL', 'RO', 'BG', 'HR', 'SI', 'GR'];\nconst PLATFORM_LABEL = { GOOGLE_ADS: 'Google Ads', META: 'Meta Ads', BOTH: 'Google + Meta' };\n\n// Accepts numbers, API strings (\"123.45\") and sheet values (\"3,5\", \"1 200 €\").\nfunction num(v) {\n  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;\n  if (v === null || v === undefined || v === '') return 0;\n  const n = Number(String(v).replace(/[\\s€%]/g, '').replace(',', '.'));\n  return Number.isFinite(n) ? n : 0;\n}\nconst round = (v, d = 2) => Math.round(num(v) * 10 ** d) / 10 ** d;\nconst safeDiv = (a, b) => (num(b) === 0 ? null : num(a) / num(b));\nconst pct = (v) => (v === null || v === undefined ? 'n/a' : `${round(v * 100, 1)} %`);\nconst eur = (v) => `${round(v, 0).toLocaleString('sk-SK')} €`;\nconst fmt = (v, d = 2) => (v === null || v === undefined ? 'n/a' : String(round(v, d)));\nconst normId = (id) => String(id ?? '').replace(/^act_/, '').replace(/-/g, '').trim();\nconst isActive = (v) => !['FALSE', 'NIE', '0', 'NO'].includes(String(v ?? 'TRUE').trim().toUpperCase());\n\n// Country from campaign name: SK_Search_Brand, \"PMax | HU | Feed\", \"Meta-RO-Prospecting\"...\nfunction countryFromName(name) {\n  const m = String(name || '').toUpperCase().match(/(?:^|[^A-Z])(SK|CZ|HU|PL|RO|BG|HR|SI|GR)(?=[^A-Z]|$)/);\n  return m ? m[1] : 'UNKNOWN';\n}\n\n// Rows of the \"accounts\" sheet -> { 'GOOGLE_ADS|1234567890': {country, currency, name} }\nfunction buildAccountMap(items) {\n  const map = {};\n  for (const { json: r } of items) {\n    if (!isActive(r.active)) continue;\n    const platform = String(r.platform || '').trim().toUpperCase();\n    map[`${platform}|${normId(r.account_id)}`] = {\n      country: String(r.country || '').trim().toUpperCase(),\n      currency: String(r.currency || '').trim().toUpperCase(),\n      name: r.account_name || '',\n    };\n  }\n  return map;\n}\n\n// Account-level country wins; accounts marked MULTI fall back to the campaign name.\nfunction resolveCountry(accountMap, platform, accountId, campaignName) {\n  const acc = accountMap[`${platform}|${normId(accountId)}`];\n  if (acc && COUNTRIES.includes(acc.country)) return acc.country;\n  return countryFromName(campaignName);\n}\n\n// fx = Frankfurter time series response {rates: {'YYYY-MM-DD': {CZK: 24.3, ...}}}, base EUR.\n// Returns units of `currency` per 1 EUR, using the latest rate on or before `date`.\nfunction fxRate(fx, currency, date) {\n  const cur = String(currency || 'EUR').toUpperCase();\n  if (cur === 'EUR') return 1;\n  if (cur === 'BGN') return 1.95583; // fixed conversion rate, BG uses EUR since 2026-01-01\n  const rates = (fx && fx.rates) || {};\n  const dates = Object.keys(rates).sort();\n  let rate = null;\n  for (const d of dates) if (d <= date && rates[d][cur]) rate = rates[d][cur];\n  if (rate === null) for (const d of dates) if (rates[d][cur]) { rate = rates[d][cur]; break; }\n  if (!rate) throw new Error(`Chýba kurz ECB pre ${cur} k ${date}`);\n  return rate;\n}\n\n// n8n HTTP node may emit one item per array element or one item wrapping the array.\nfunction unwrap(items, key) {\n  const out = [];\n  for (const { json } of items) {\n    const parts = Array.isArray(json) ? json : [json];\n    for (const p of parts) {\n      if (p && Array.isArray(p[key])) out.push(...p[key]);\n    }\n  }\n  return out;\n}\n\n// Rule -> Asana task type (used when a task is built from a finding without AI).\nconst RULE_TYPE = {\n  TRACKING_OUTAGE: 'TRACKING', NO_DATA: 'DATA_QUALITY', UNMAPPED: 'DATA_QUALITY',\n  PACING_OVER: 'BUDGET', PACING_UNDER: 'BUDGET',\n  KPI_BELOW_TARGET: 'PERFORMANCE', KPI_WOW_DROP: 'PERFORMANCE', CAMPAIGN_DROP: 'PERFORMANCE',\n  WASTE_NO_CONV: 'WASTE', SCALE_BUDGET: 'SCALE', CREATIVE_FATIGUE: 'CREATIVE',\n  SEARCH_TERMS: 'SEARCH_TERMS', POLICY: 'POLICY', LEARNING_LIMITED: 'LEARNING',\n};\nconst PRIORITY_ORDER = { P1: 0, P2: 1, P3: 2 };\n\n// BigQuery nodes run with \"Always Output Data\", so an empty result is one empty item.\nconst rows = (items) => items.map((i) => i.json).filter((j) => j && Object.keys(j).length > 0);\n\n// Alert-ID custom field text -> Set of alert keys.\nconst parseKeys = (text) => new Set(String(text || '').split(/[\\s,;]+/).map((s) => s.trim()).filter(Boolean));\n\n// Open tasks of the Asana project (paginated HTTP output) -> [{gid, name, url, keys:Set, priority}]\nfunction openTasks(items, alertFieldGid, priorityFieldGid) {\n  return unwrap(items, 'data').map((t) => {\n    const cf = (gid) => (t.custom_fields || []).find((c) => c.gid === gid);\n    const alert = cf(alertFieldGid);\n    const prio = priorityFieldGid ? cf(priorityFieldGid) : null;\n    return {\n      gid: t.gid,\n      name: t.name,\n      url: t.permalink_url,\n      keys: parseKeys(alert && (alert.text_value ?? alert.display_value)),\n      priority: prio ? ((prio.enum_value && prio.enum_value.name) || prio.display_value || '') : '',\n    };\n  });\n}\n\n// A finding turned into a task without AI (fallback, or update of an already-open task).\nfunction taskFromFinding(f, source) {\n  return {\n    alert_keys: [f.alert_key],\n    title: f.title.slice(0, 120),\n    country: f.country,\n    platform: f.platform,\n    type: RULE_TYPE[f.rule] || 'PERFORMANCE',\n    priority: f.severity,\n    diagnosis: f.summary_line,\n    action_steps: f.suggested_steps || [],\n    expected_impact: '',\n    expected_impact_eur: 0,\n    campaign_id: f.campaign_id || '',\n    source,\n    findings: [f],\n  };\n}\n\n// ---- wf2_rules.js ----\n// Deterministic rules over BigQuery aggregates -> findings.\n// Each finding has a stable alert_key so WF4 can comment on an open Asana task\n// instead of creating a duplicate.\nconst cfg = $('Config').first().json;\nconst D = cfg.rule_defaults;\n\n// --- targets sheet: one row per country × platform ---------------------------\nconst targets = {};\nfor (const { json: t } of $('Targets').all()) {\n  const platform = String(t.platform || '').trim().toUpperCase();\n  const country = String(t.country || '').trim().toUpperCase();\n  if (!platform || !country || !isActive(t.active)) continue;\n  const val = (k) => (t[k] === undefined || t[k] === '' ? D[k] : num(t[k]));\n  targets[`${platform}|${country}`] = {\n    platform,\n    country,\n    kpi: String(t.kpi || 'ROAS').trim().toUpperCase(),\n    monthly_budget_eur: num(t.monthly_budget_eur),\n    target_roas: num(t.target_roas),\n    target_cpa_eur: num(t.target_cpa_eur),\n    pacing_tolerance: val('pacing_tolerance'),\n    kpi_tolerance: val('kpi_tolerance'),\n    wow_drop: val('wow_drop'),\n    min_spend_7d_eur: val('min_spend_7d_eur'),\n    min_spend_campaign_7d_eur: val('min_spend_campaign_7d_eur'),\n    max_frequency: val('max_frequency'),\n  };\n}\n\nconst perf = rows($('BQ Perf').all());\nconst searchTerms = rows($('BQ Search Terms').all());\nconst issues = rows($('BQ Issues').all());\nconst metaFreq = rows($('BQ Meta Freq').all());\nconst runDate = perf.length ? String(perf[0].run_date).slice(0, 10) : $today.minus({ days: 1 }).toISODate();\nconst month = runDate.slice(0, 7);\n\nconst findings = [];\nfunction add(f) {\n  findings.push({\n    run_date: runDate,\n    scope_level: 'country',\n    scope_id: 'ALL',\n    scope_name: f.country,\n    suggested_steps: [],\n    ...f,\n    alert_key: [f.platform, f.country, f.scope_id || 'ALL', f.rule, f.key_suffix].filter(Boolean).join('|'),\n  });\n}\nconst label = (platform, country) => `${country} ${PLATFORM_LABEL[platform] || platform}`;\nconst kpiText = (t, value, cost, conv) =>\n  t.kpi === 'CPA'\n    ? `CPA ${fmt(safeDiv(cost, conv))} € (cieľ ${fmt(t.target_cpa_eur)} €)`\n    : `ROAS ${fmt(safeDiv(value, cost))} (cieľ ${fmt(t.target_roas)})`;\n\n// Returns a signed miss ratio: > 0 means worse than target by that fraction.\nfunction kpiMiss(t, value, cost, conv) {\n  if (t.kpi === 'CPA') {\n    if (!t.target_cpa_eur) return null;\n    const cpa = safeDiv(cost, conv);\n    return cpa === null ? (num(cost) > 0 ? Infinity : null) : cpa / t.target_cpa_eur - 1;\n  }\n  if (!t.target_roas) return null;\n  const roas = safeDiv(value, cost);\n  return roas === null ? null : 1 - roas / t.target_roas;\n}\n\n// --- country level -----------------------------------------------------------\nconst countryRows = perf.filter((r) => r.level === 'country');\nconst seen = new Set(countryRows.map((r) => `${r.platform}|${r.country}`));\n\nfor (const [key, t] of Object.entries(targets)) {\n  if (t.monthly_budget_eur > 0 && !seen.has(key)) {\n    add({\n      rule: 'NO_DATA', severity: 'P1', platform: t.platform, country: t.country,\n      title: `${label(t.platform, t.country)}: žiadne dáta ani spend za 14 dní`,\n      summary_line: `Pre ${label(t.platform, t.country)} nie sú v dátach žiadne náklady, hoci je nastavený rozpočet ${eur(t.monthly_budget_eur)}.`,\n      metrics: { monthly_budget_eur: t.monthly_budget_eur },\n      suggested_steps: [\n        'Skontrolovať, či kampane bežia (stav účtu, platby, zamietnutia).',\n        'Overiť mapovanie účtu v záložke \"accounts\" v Config Sheete.',\n        'Skontrolovať poslednú exekúciu WF1 v n8n.',\n      ],\n    });\n  }\n}\n\nfor (const r of countryRows) {\n  const key = `${r.platform}|${r.country}`;\n  const t = targets[key];\n\n  if (r.country === 'UNKNOWN') {\n    add({\n      rule: 'UNMAPPED', severity: 'P3', platform: r.platform, country: 'ALL', key_suffix: 'UNKNOWN',\n      title: `${PLATFORM_LABEL[r.platform]}: náklady ${eur(r.cost_7d)} bez priradenej krajiny`,\n      summary_line: `Kampane za ${eur(r.cost_7d)} (7 dní) nemajú krajinu v názve ani v mapovaní účtu.`,\n      metrics: { cost_7d: round(r.cost_7d) },\n      suggested_steps: ['Doplniť kód krajiny do názvov kampaní alebo mapovanie účtu v Config Sheete.'],\n    });\n    continue;\n  }\n  if (!t) continue;\n\n  const cost1 = num(r.cost_1d), cost7 = num(r.cost_7d), costP7 = num(r.cost_p7);\n  const conv1 = num(r.conv_1d), conv7 = num(r.conv_7d), convP7 = num(r.conv_p7);\n  const value7 = num(r.value_7d), valueP7 = num(r.value_p7);\n  const convAvg = num(r.conv_avg_b7);\n\n  // 1) Tracking outage: conversions collapse while money is still being spent.\n  if (convAvg >= D.outage_min_daily_conv && cost1 > 0 && conv1 <= convAvg * (1 - D.outage_drop)) {\n    add({\n      rule: 'TRACKING_OUTAGE', severity: 'P1', platform: r.platform, country: r.country,\n      title: `${label(r.platform, r.country)}: prepad konverzií včera (${fmt(conv1, 1)} vs. priemer ${fmt(convAvg, 1)}/deň)`,\n      summary_line: `Včera ${fmt(conv1, 1)} konverzií pri nákladoch ${eur(cost1)}, 7-dňový priemer ${fmt(convAvg, 1)}/deň.`,\n      metrics: { conv_1d: conv1, conv_avg_b7: round(convAvg), cost_1d: round(cost1) },\n      suggested_steps: [\n        'Overiť meranie: GA4/Google Ads tag, Meta Pixel + CAPI (Events Manager), testovacia objednávka.',\n        'Skontrolovať e-shop (checkout, platobná brána, dostupnosť webu) v danej krajine.',\n        'Ak ide o výpadok merania, informovať klienta a nemeniť biddingové stratégie, kým sa dáta neopravia.',\n      ],\n    });\n  }\n\n  // 2) Budget pacing (month to date vs. linear plan).\n  if (t.monthly_budget_eur > 0 && num(r.days_elapsed) >= D.pacing_min_days) {\n    const days = num(r.days_elapsed), dim = num(r.days_in_month);\n    const projected = (num(r.cost_mtd) / days) * dim;\n    const dev = projected / t.monthly_budget_eur - 1;\n    const common = {\n      platform: r.platform, country: r.country, key_suffix: month,\n      metrics: {\n        cost_mtd: round(r.cost_mtd), monthly_budget_eur: t.monthly_budget_eur,\n        projected_eur: round(projected), deviation: round(dev, 3), days_elapsed: days, days_in_month: dim,\n      },\n      summary_line: `MTD ${eur(r.cost_mtd)}, projekcia ${eur(projected)} vs. rozpočet ${eur(t.monthly_budget_eur)} (${pct(dev)}).`,\n    };\n    if (dev > t.pacing_tolerance) {\n      add({\n        ...common, rule: 'PACING_OVER', severity: dev > 2 * t.pacing_tolerance ? 'P1' : 'P2',\n        title: `${label(r.platform, r.country)}: hrozí prečerpanie rozpočtu o ${pct(dev)}`,\n        suggested_steps: [\n          `Znížiť denné rozpočty tak, aby zvyšok mesiaca stál max. ${eur(Math.max(0, t.monthly_budget_eur - num(r.cost_mtd)))}.`,\n          'Začať kampaňami s najhorším ROAS/CPA; brand a remarketing obmedziť až nakoniec.',\n        ],\n      });\n    } else if (dev < -t.pacing_tolerance) {\n      add({\n        ...common, rule: 'PACING_UNDER', severity: 'P2',\n        title: `${label(r.platform, r.country)}: podčerpanie rozpočtu (${pct(dev)})`,\n        suggested_steps: [\n          'Identifikovať kampane obmedzené rozpočtom alebo cieľom (tROAS/tCPA príliš prísne).',\n          'Presunúť rozpočet do kampaní s ROAS nad cieľom, prípadne uvoľniť cieľ bidding stratégie.',\n        ],\n      });\n    }\n  }\n\n  // 3) KPI vs. target (7 days) and 4) week-over-week drop.\n  if (cost7 >= t.min_spend_7d_eur) {\n    const miss = kpiMiss(t, value7, cost7, conv7);\n    const metrics = {\n      cost_7d: round(cost7), value_7d: round(value7), conv_7d: round(conv7, 1),\n      roas_7d: round(safeDiv(value7, cost7) ?? 0), cpa_7d: round(safeDiv(cost7, conv7) ?? 0),\n      roas_p7: round(safeDiv(valueP7, costP7) ?? 0), target_roas: t.target_roas, target_cpa_eur: t.target_cpa_eur,\n    };\n    if (miss !== null && miss > t.kpi_tolerance) {\n      add({\n        rule: 'KPI_BELOW_TARGET', severity: 'P2', platform: r.platform, country: r.country, metrics,\n        title: `${label(r.platform, r.country)}: ${t.kpi} 7 dní mimo cieľa`,\n        summary_line: `${kpiText(t, value7, cost7, conv7)}, náklady ${eur(cost7)}, konverzie ${fmt(conv7, 1)}.`,\n        suggested_steps: [\n          'Rozpadnúť výkon podľa kampaní a nájsť hlavného vinníka (náklady × KPI).',\n          'Skontrolovať zmeny za posledné 2 týždne (bidding, rozpočty, kreatívy, feed, ceny, sklad).',\n          'Upraviť ciele bidding stratégie alebo presunúť rozpočet do výkonnejších kampaní.',\n        ],\n      });\n    } else if (costP7 >= t.min_spend_7d_eur && convP7 >= D.wow_min_conv) {\n      const roas7 = safeDiv(value7, cost7), roasP7 = safeDiv(valueP7, costP7);\n      const cpa7 = safeDiv(cost7, conv7), cpaP7 = safeDiv(costP7, convP7);\n      const drop = t.kpi === 'CPA'\n        ? (cpa7 === null ? 1 : cpa7 / cpaP7 - 1)\n        : (roasP7 ? 1 - roas7 / roasP7 : 0);\n      if (drop > t.wow_drop) {\n        add({\n          rule: 'KPI_WOW_DROP', severity: 'P2', platform: r.platform, country: r.country, metrics,\n          title: `${label(r.platform, r.country)}: ${t.kpi} týždeň na týždeň horší o ${pct(drop)}`,\n          summary_line: t.kpi === 'CPA'\n            ? `CPA ${fmt(cpa7)} € vs. ${fmt(cpaP7)} € minulý týždeň.`\n            : `ROAS ${fmt(roas7)} vs. ${fmt(roasP7)} minulý týždeň, náklady ${eur(cost7)} vs. ${eur(costP7)}.`,\n          suggested_steps: [\n            'Nájsť kampane s najväčším poklesom a skontrolovať nedávne zmeny.',\n            'Overiť sezónnosť, akcie konkurencie a dostupnosť produktov.',\n          ],\n        });\n      }\n    }\n  }\n}\n\n// --- campaign level ----------------------------------------------------------\nconst campaignRows = perf.filter((r) => r.level === 'campaign' && r.country !== 'UNKNOWN');\nfor (const r of campaignRows) {\n  const t = targets[`${r.platform}|${r.country}`];\n  if (!t) continue;\n  const cost7 = num(r.cost_7d), conv7 = num(r.conv_7d), value7 = num(r.value_7d);\n  const scope = { scope_level: 'campaign', scope_id: String(r.scope_id), scope_name: r.scope_name, campaign_id: String(r.scope_id) };\n  const metrics = {\n    cost_7d: round(cost7), conv_7d: round(conv7, 1), value_7d: round(value7),\n    roas_7d: round(safeDiv(value7, cost7) ?? 0), lost_is_budget_7d: round(r.lost_is_budget_7d ?? 0, 3),\n  };\n\n  // 5) Spend without conversions.\n  const wasteThreshold = Math.max(t.min_spend_campaign_7d_eur, t.kpi === 'CPA' ? 2 * t.target_cpa_eur : 0);\n  if (cost7 >= wasteThreshold && conv7 === 0) {\n    add({\n      ...scope, rule: 'WASTE_NO_CONV', severity: 'P2', platform: r.platform, country: r.country, metrics,\n      title: `${label(r.platform, r.country)}: kampaň „${r.scope_name}“ minula ${eur(cost7)} bez konverzie`,\n      summary_line: `${eur(cost7)} za 7 dní, 0 konverzií.`,\n      suggested_steps: [\n        'Skontrolovať cielenie, search termy / umiestnenia a vstupnú stránku.',\n        'Zvážiť zníženie rozpočtu alebo pozastavenie do vyriešenia.',\n      ],\n    });\n    continue;\n  }\n\n  // 6) Profitable Google campaign limited by budget -> scale opportunity.\n  const miss = kpiMiss(t, value7, cost7, conv7);\n  if (r.platform === 'GOOGLE_ADS' && num(r.lost_is_budget_7d) >= D.scale_lost_is_budget\n      && conv7 >= D.scale_min_conv && miss !== null && miss <= 0) {\n    add({\n      ...scope, rule: 'SCALE_BUDGET', severity: 'P3', platform: r.platform, country: r.country, metrics,\n      title: `${label(r.platform, r.country)}: „${r.scope_name}“ je nad cieľom, ale obmedzená rozpočtom`,\n      summary_line: `${kpiText(t, value7, cost7, conv7)}, stratený IS kvôli rozpočtu ${pct(r.lost_is_budget_7d)}.`,\n      suggested_steps: [\n        'Navýšiť denný rozpočet o 15–20 % (postupne, max. raz za 3–4 dni).',\n        'Skontrolovať, či to celkový mesačný rozpočet krajiny dovoľuje.',\n      ],\n    });\n  }\n\n  // 7) Significant campaign-level drop week over week.\n  const costP7 = num(r.cost_p7), convP7 = num(r.conv_p7), valueP7 = num(r.value_p7);\n  if (cost7 >= 2 * t.min_spend_campaign_7d_eur && convP7 >= D.wow_min_conv && t.kpi !== 'CPA') {\n    const roas7 = safeDiv(value7, cost7) ?? 0, roasP7 = safeDiv(valueP7, costP7);\n    if (roasP7 && 1 - roas7 / roasP7 > t.wow_drop && miss !== null && miss > 0) {\n      add({\n        ...scope, rule: 'CAMPAIGN_DROP', severity: 'P3', platform: r.platform, country: r.country, metrics,\n        title: `${label(r.platform, r.country)}: pokles ROAS kampane „${r.scope_name}“`,\n        summary_line: `ROAS ${fmt(roas7)} vs. ${fmt(roasP7)} minulý týždeň pri nákladoch ${eur(cost7)}.`,\n        suggested_steps: ['Skontrolovať zmeny v kampani, feed/ceny a konkurenciu (Auction insights).'],\n      });\n    }\n  }\n}\n\n// --- Meta ad sets: creative fatigue ------------------------------------------\nconst adsetPerf = Object.fromEntries(perf.filter((r) => r.level === 'adset').map((r) => [String(r.scope_id), r]));\nfor (const a of metaFreq) {\n  const t = targets[`META|${a.country}`];\n  if (!t || num(a.spend_eur) < t.min_spend_campaign_7d_eur || num(a.frequency) <= t.max_frequency) continue;\n  const p = adsetPerf[String(a.adset_id)] || {};\n  const ctr7 = safeDiv(p.clicks_7d, p.impr_7d), ctrP7 = safeDiv(p.clicks_p7, p.impr_p7);\n  add({\n    rule: 'CREATIVE_FATIGUE', severity: 'P3', platform: 'META', country: a.country,\n    scope_level: 'adset', scope_id: String(a.adset_id), scope_name: a.adset_name, campaign_id: String(a.campaign_id),\n    title: `${label('META', a.country)}: vysoká frekvencia v ad sete „${a.adset_name}“ (${fmt(a.frequency, 1)})`,\n    summary_line: `Frekvencia 7 dní ${fmt(a.frequency, 1)}, spend ${eur(a.spend_eur)}, CTR ${pct(ctr7)} vs. ${pct(ctrP7)} minulý týždeň.`,\n    metrics: { frequency_7d: round(a.frequency, 2), spend_7d: round(a.spend_eur), ctr_7d: ctr7, ctr_p7: ctrP7 },\n    suggested_steps: [\n      'Pripraviť a nasadiť 2–3 nové kreatívy (nový hook/formát).',\n      'Rozšíriť publikum alebo vylúčiť nedávnych konvertujúcich.',\n    ],\n  });\n}\n\n// --- Google search terms: one finding per country ----------------------------\nconst stByCountry = {};\nfor (const s of searchTerms) {\n  if (num(s.cost_eur) < D.search_term_min_cost_eur || s.country === 'UNKNOWN') continue;\n  (stByCountry[s.country] ||= []).push(s);\n}\nfor (const [country, list] of Object.entries(stByCountry)) {\n  if (!targets[`GOOGLE_ADS|${country}`]) continue;\n  const total = list.reduce((a, s) => a + num(s.cost_eur), 0);\n  const top = list.slice(0, 25);\n  add({\n    rule: 'SEARCH_TERMS', severity: 'P3', platform: 'GOOGLE_ADS', country, key_suffix: runDate.slice(0, 7),\n    title: `${label('GOOGLE_ADS', country)}: search termy bez konverzie (${list.length}, spolu ${eur(total)})`,\n    summary_line: `Top: ${top.slice(0, 5).map((s) => `„${s.search_term}“ ${eur(s.cost_eur)}`).join(', ')}.`,\n    metrics: {\n      total_cost_eur: round(total), count: list.length,\n      terms: top.map((s) => ({ term: s.search_term, cost: round(s.cost_eur), clicks: num(s.clicks), campaign: s.campaign_name })),\n    },\n    suggested_steps: [\n      'Prejsť zoznam a irelevantné výrazy pridať ako negatívne KW (zdieľaný zoznam pre krajinu).',\n      'Relevantné výrazy s kliknutiami zvážiť ako samostatné KW s vlastnou reklamou.',\n    ],\n  });\n}\n\n// --- disapproved ads / learning limited: one finding per country × platform × issue\nconst issueGroups = {};\nfor (const i of issues) {\n  const kind = i.issue === 'LEARNING_LIMITED' ? 'LEARNING_LIMITED' : 'POLICY';\n  (issueGroups[`${i.platform}|${i.country}|${kind}`] ||= []).push(i);\n}\nfor (const [key, list] of Object.entries(issueGroups)) {\n  const [platform, country, kind] = key.split('|');\n  const names = list.slice(0, 15).map((i) => `${i.entity_name} (${i.campaign_name})`);\n  if (kind === 'POLICY') {\n    add({\n      rule: 'POLICY', severity: 'P2', platform, country,\n      title: `${label(platform, country)}: zamietnuté alebo problémové reklamy (${list.length})`,\n      summary_line: `Napr.: ${names.slice(0, 3).join('; ')}.`,\n      metrics: { count: list.length, entities: names, details: list.slice(0, 15).map((i) => i.detail).filter(Boolean) },\n      suggested_steps: [\n        'Skontrolovať dôvod zamietnutia v rozhraní platformy.',\n        'Upraviť reklamu/kreatívu alebo podať odvolanie; nahradiť ju funkčnou verziou.',\n      ],\n    });\n  } else {\n    add({\n      rule: 'LEARNING_LIMITED', severity: 'P3', platform, country,\n      title: `${label(platform, country)}: ad sety v stave Learning limited (${list.length})`,\n      summary_line: `Napr.: ${names.slice(0, 3).join('; ')}.`,\n      metrics: { count: list.length, entities: names },\n      suggested_steps: [\n        'Zlúčiť malé ad sety alebo rozšíriť publikum, aby dosiahli ~50 optimalizačných udalostí týždenne.',\n        'Zvážiť optimalizáciu na udalosť vyššie vo funneli (napr. AddToCart), ak je nákupov málo.',\n      ],\n    });\n  }\n}\n\nfindings.sort((a, b) => PRIORITY_ORDER[a.severity] - PRIORITY_ORDER[b.severity]);\nreturn findings.map((f) => ({ json: f }));\n"
+      },
+      "id": "cb8e47b2-09ff-5b14-a100-1da27eea6bcb",
+      "name": "Rules",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1960,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shared helpers. build.py prepends this file to every Code node, so keep it\n// free of top-level side effects and never redeclare these names in node code.\nconst COUNTRIES = ['SK', 'CZ', 'HU', 'PL', 'RO', 'BG', 'HR', 'SI', 'GR'];\nconst PLATFORM_LABEL = { GOOGLE_ADS: 'Google Ads', META: 'Meta Ads', BOTH: 'Google + Meta' };\n\n// Accepts numbers, API strings (\"123.45\") and sheet values (\"3,5\", \"1 200 €\").\nfunction num(v) {\n  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;\n  if (v === null || v === undefined || v === '') return 0;\n  const n = Number(String(v).replace(/[\\s€%]/g, '').replace(',', '.'));\n  return Number.isFinite(n) ? n : 0;\n}\nconst round = (v, d = 2) => Math.round(num(v) * 10 ** d) / 10 ** d;\nconst safeDiv = (a, b) => (num(b) === 0 ? null : num(a) / num(b));\nconst pct = (v) => (v === null || v === undefined ? 'n/a' : `${round(v * 100, 1)} %`);\nconst eur = (v) => `${round(v, 0).toLocaleString('sk-SK')} €`;\nconst fmt = (v, d = 2) => (v === null || v === undefined ? 'n/a' : String(round(v, d)));\nconst normId = (id) => String(id ?? '').replace(/^act_/, '').replace(/-/g, '').trim();\nconst isActive = (v) => !['FALSE', 'NIE', '0', 'NO'].includes(String(v ?? 'TRUE').trim().toUpperCase());\n\n// Country from campaign name: SK_Search_Brand, \"PMax | HU | Feed\", \"Meta-RO-Prospecting\"...\nfunction countryFromName(name) {\n  const m = String(name || '').toUpperCase().match(/(?:^|[^A-Z])(SK|CZ|HU|PL|RO|BG|HR|SI|GR)(?=[^A-Z]|$)/);\n  return m ? m[1] : 'UNKNOWN';\n}\n\n// Rows of the \"accounts\" sheet -> { 'GOOGLE_ADS|1234567890': {country, currency, name} }\nfunction buildAccountMap(items) {\n  const map = {};\n  for (const { json: r } of items) {\n    if (!isActive(r.active)) continue;\n    const platform = String(r.platform || '').trim().toUpperCase();\n    map[`${platform}|${normId(r.account_id)}`] = {\n      country: String(r.country || '').trim().toUpperCase(),\n      currency: String(r.currency || '').trim().toUpperCase(),\n      name: r.account_name || '',\n    };\n  }\n  return map;\n}\n\n// Account-level country wins; accounts marked MULTI fall back to the campaign name.\nfunction resolveCountry(accountMap, platform, accountId, campaignName) {\n  const acc = accountMap[`${platform}|${normId(accountId)}`];\n  if (acc && COUNTRIES.includes(acc.country)) return acc.country;\n  return countryFromName(campaignName);\n}\n\n// fx = Frankfurter time series response {rates: {'YYYY-MM-DD': {CZK: 24.3, ...}}}, base EUR.\n// Returns units of `currency` per 1 EUR, using the latest rate on or before `date`.\nfunction fxRate(fx, currency, date) {\n  const cur = String(currency || 'EUR').toUpperCase();\n  if (cur === 'EUR') return 1;\n  if (cur === 'BGN') return 1.95583; // fixed conversion rate, BG uses EUR since 2026-01-01\n  const rates = (fx && fx.rates) || {};\n  const dates = Object.keys(rates).sort();\n  let rate = null;\n  for (const d of dates) if (d <= date && rates[d][cur]) rate = rates[d][cur];\n  if (rate === null) for (const d of dates) if (rates[d][cur]) { rate = rates[d][cur]; break; }\n  if (!rate) throw new Error(`Chýba kurz ECB pre ${cur} k ${date}`);\n  return rate;\n}\n\n// n8n HTTP node may emit one item per array element or one item wrapping the array.\nfunction unwrap(items, key) {\n  const out = [];\n  for (const { json } of items) {\n    const parts = Array.isArray(json) ? json : [json];\n    for (const p of parts) {\n      if (p && Array.isArray(p[key])) out.push(...p[key]);\n    }\n  }\n  return out;\n}\n\n// Rule -> Asana task type (used when a task is built from a finding without AI).\nconst RULE_TYPE = {\n  TRACKING_OUTAGE: 'TRACKING', NO_DATA: 'DATA_QUALITY', UNMAPPED: 'DATA_QUALITY',\n  PACING_OVER: 'BUDGET', PACING_UNDER: 'BUDGET',\n  KPI_BELOW_TARGET: 'PERFORMANCE', KPI_WOW_DROP: 'PERFORMANCE', CAMPAIGN_DROP: 'PERFORMANCE',\n  WASTE_NO_CONV: 'WASTE', SCALE_BUDGET: 'SCALE', CREATIVE_FATIGUE: 'CREATIVE',\n  SEARCH_TERMS: 'SEARCH_TERMS', POLICY: 'POLICY', LEARNING_LIMITED: 'LEARNING',\n};\nconst PRIORITY_ORDER = { P1: 0, P2: 1, P3: 2 };\n\n// BigQuery nodes run with \"Always Output Data\", so an empty result is one empty item.\nconst rows = (items) => items.map((i) => i.json).filter((j) => j && Object.keys(j).length > 0);\n\n// Alert-ID custom field text -> Set of alert keys.\nconst parseKeys = (text) => new Set(String(text || '').split(/[\\s,;]+/).map((s) => s.trim()).filter(Boolean));\n\n// Open tasks of the Asana project (paginated HTTP output) -> [{gid, name, url, keys:Set, priority}]\nfunction openTasks(items, alertFieldGid, priorityFieldGid) {\n  return unwrap(items, 'data').map((t) => {\n    const cf = (gid) => (t.custom_fields || []).find((c) => c.gid === gid);\n    const alert = cf(alertFieldGid);\n    const prio = priorityFieldGid ? cf(priorityFieldGid) : null;\n    return {\n      gid: t.gid,\n      name: t.name,\n      url: t.permalink_url,\n      keys: parseKeys(alert && (alert.text_value ?? alert.display_value)),\n      priority: prio ? ((prio.enum_value && prio.enum_value.name) || prio.display_value || '') : '',\n    };\n  });\n}\n\n// A finding turned into a task without AI (fallback, or update of an already-open task).\nfunction taskFromFinding(f, source) {\n  return {\n    alert_keys: [f.alert_key],\n    title: f.title.slice(0, 120),\n    country: f.country,\n    platform: f.platform,\n    type: RULE_TYPE[f.rule] || 'PERFORMANCE',\n    priority: f.severity,\n    diagnosis: f.summary_line,\n    action_steps: f.suggested_steps || [],\n    expected_impact: '',\n    expected_impact_eur: 0,\n    campaign_id: f.campaign_id || '',\n    source,\n    findings: [f],\n  };\n}\n\n// ---- wf2_findings_to_bq.js ----\n// findings -> BigQuery rows (nested objects serialized to JSON strings).\nconst created = new Date().toISOString();\nreturn $input.all().map(({ json: f }) => ({\n  json: {\n    run_date: f.run_date,\n    alert_key: f.alert_key,\n    rule: f.rule,\n    severity: f.severity,\n    platform: f.platform,\n    country: f.country,\n    scope_level: f.scope_level,\n    scope_id: f.scope_id,\n    scope_name: f.scope_name,\n    title: f.title,\n    summary_line: f.summary_line,\n    metrics: JSON.stringify(f.metrics || {}),\n    created_at: created,\n  },\n}));\n"
+      },
+      "id": "f1d9230c-2927-5416-ac68-693ec634f201",
+      "name": "Findings to BQ",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2240,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "insert",
+        "projectId": {
+          "__rl": true,
+          "value": "YOUR_GCP_PROJECT",
+          "mode": "id"
+        },
+        "datasetId": {
+          "__rl": true,
+          "value": "balabim_ads",
+          "mode": "id"
+        },
+        "tableId": {
+          "__rl": true,
+          "value": "findings",
+          "mode": "id"
+        },
+        "dataMode": "autoMap",
+        "options": {}
+      },
+      "id": "c50d447e-c5a4-51b7-877a-45c0c3731815",
+      "name": "BQ findings",
+      "type": "n8n-nodes-base.googleBigQuery",
+      "typeVersion": 2.1,
+      "position": [
+        2520,
+        -200
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "REPLACE_ME",
+          "name": "Google Service Account (BigQuery + Sheets)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "REPLACE_AFTER_IMPORT",
+          "mode": "id"
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "53c906e7-1898-5d8b-801f-cec913376895",
+      "name": "AI analytik (WF3)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2240,
+        200
+      ]
+    }
+  ],
+  "connections": {
+    "Každý deň 07:00": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Targets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Targets": {
+      "main": [
+        [
+          {
+            "node": "BQ Perf",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "BQ Perf": {
+      "main": [
+        [
+          {
+            "node": "BQ Search Terms",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "BQ Search Terms": {
+      "main": [
+        [
+          {
+            "node": "BQ Issues",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "BQ Issues": {
+      "main": [
+        [
+          {
+            "node": "BQ Meta Freq",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "BQ Meta Freq": {
+      "main": [
+        [
+          {
+            "node": "Rules",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rules": {
+      "main": [
+        [
+          {
+            "node": "Findings to BQ",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "AI analytik (WF3)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Findings to BQ": {
+      "main": [
+        [
+          {
+            "node": "BQ findings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Bratislava",
+    "saveManualExecutions": true
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}

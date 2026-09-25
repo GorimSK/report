@@ -1,0 +1,1110 @@
+{
+  "name": "Balabim PPC – WF1 Denný zber dát",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 * * *"
+            }
+          ]
+        }
+      },
+      "id": "e0912b83-281b-5ed5-b8b3-f81881807fdd",
+      "name": "Každý deň 06:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shared helpers. build.py prepends this file to every Code node, so keep it\n// free of top-level side effects and never redeclare these names in node code.\nconst COUNTRIES = ['SK', 'CZ', 'HU', 'PL', 'RO', 'BG', 'HR', 'SI', 'GR'];\nconst PLATFORM_LABEL = { GOOGLE_ADS: 'Google Ads', META: 'Meta Ads', BOTH: 'Google + Meta' };\n\n// Accepts numbers, API strings (\"123.45\") and sheet values (\"3,5\", \"1 200 €\").\nfunction num(v) {\n  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;\n  if (v === null || v === undefined || v === '') return 0;\n  const n = Number(String(v).replace(/[\\s€%]/g, '').replace(',', '.'));\n  return Number.isFinite(n) ? n : 0;\n}\nconst round = (v, d = 2) => Math.round(num(v) * 10 ** d) / 10 ** d;\nconst safeDiv = (a, b) => (num(b) === 0 ? null : num(a) / num(b));\nconst pct = (v) => (v === null || v === undefined ? 'n/a' : `${round(v * 100, 1)} %`);\nconst eur = (v) => `${round(v, 0).toLocaleString('sk-SK')} €`;\nconst fmt = (v, d = 2) => (v === null || v === undefined ? 'n/a' : String(round(v, d)));\nconst normId = (id) => String(id ?? '').replace(/^act_/, '').replace(/-/g, '').trim();\nconst isActive = (v) => !['FALSE', 'NIE', '0', 'NO'].includes(String(v ?? 'TRUE').trim().toUpperCase());\n\n// Country from campaign name: SK_Search_Brand, \"PMax | HU | Feed\", \"Meta-RO-Prospecting\"...\nfunction countryFromName(name) {\n  const m = String(name || '').toUpperCase().match(/(?:^|[^A-Z])(SK|CZ|HU|PL|RO|BG|HR|SI|GR)(?=[^A-Z]|$)/);\n  return m ? m[1] : 'UNKNOWN';\n}\n\n// Rows of the \"accounts\" sheet -> { 'GOOGLE_ADS|1234567890': {country, currency, name} }\nfunction buildAccountMap(items) {\n  const map = {};\n  for (const { json: r } of items) {\n    if (!isActive(r.active)) continue;\n    const platform = String(r.platform || '').trim().toUpperCase();\n    map[`${platform}|${normId(r.account_id)}`] = {\n      country: String(r.country || '').trim().toUpperCase(),\n      currency: String(r.currency || '').trim().toUpperCase(),\n      name: r.account_name || '',\n    };\n  }\n  return map;\n}\n\n// Account-level country wins; accounts marked MULTI fall back to the campaign name.\nfunction resolveCountry(accountMap, platform, accountId, campaignName) {\n  const acc = accountMap[`${platform}|${normId(accountId)}`];\n  if (acc && COUNTRIES.includes(acc.country)) return acc.country;\n  return countryFromName(campaignName);\n}\n\n// fx = Frankfurter time series response {rates: {'YYYY-MM-DD': {CZK: 24.3, ...}}}, base EUR.\n// Returns units of `currency` per 1 EUR, using the latest rate on or before `date`.\nfunction fxRate(fx, currency, date) {\n  const cur = String(currency || 'EUR').toUpperCase();\n  if (cur === 'EUR') return 1;\n  if (cur === 'BGN') return 1.95583; // fixed conversion rate, BG uses EUR since 2026-01-01\n  const rates = (fx && fx.rates) || {};\n  const dates = Object.keys(rates).sort();\n  let rate = null;\n  for (const d of dates) if (d <= date && rates[d][cur]) rate = rates[d][cur];\n  if (rate === null) for (const d of dates) if (rates[d][cur]) { rate = rates[d][cur]; break; }\n  if (!rate) throw new Error(`Chýba kurz ECB pre ${cur} k ${date}`);\n  return rate;\n}\n\n// n8n HTTP node may emit one item per array element or one item wrapping the array.\nfunction unwrap(items, key) {\n  const out = [];\n  for (const { json } of items) {\n    const parts = Array.isArray(json) ? json : [json];\n    for (const p of parts) {\n      if (p && Array.isArray(p[key])) out.push(...p[key]);\n    }\n  }\n  return out;\n}\n\n// Rule -> Asana task type (used when a task is built from a finding without AI).\nconst RULE_TYPE = {\n  TRACKING_OUTAGE: 'TRACKING', NO_DATA: 'DATA_QUALITY', UNMAPPED: 'DATA_QUALITY',\n  PACING_OVER: 'BUDGET', PACING_UNDER: 'BUDGET',\n  KPI_BELOW_TARGET: 'PERFORMANCE', KPI_WOW_DROP: 'PERFORMANCE', CAMPAIGN_DROP: 'PERFORMANCE',\n  WASTE_NO_CONV: 'WASTE', SCALE_BUDGET: 'SCALE', CREATIVE_FATIGUE: 'CREATIVE',\n  SEARCH_TERMS: 'SEARCH_TERMS', POLICY: 'POLICY', LEARNING_LIMITED: 'LEARNING',\n};\nconst PRIORITY_ORDER = { P1: 0, P2: 1, P3: 2 };\n\n// BigQuery nodes run with \"Always Output Data\", so an empty result is one empty item.\nconst rows = (items) => items.map((i) => i.json).filter((j) => j && Object.keys(j).length > 0);\n\n// Alert-ID custom field text -> Set of alert keys.\nconst parseKeys = (text) => new Set(String(text || '').split(/[\\s,;]+/).map((s) => s.trim()).filter(Boolean));\n\n// Open tasks of the Asana project (paginated HTTP output) -> [{gid, name, url, keys:Set, priority}]\nfunction openTasks(items, alertFieldGid, priorityFieldGid) {\n  return unwrap(items, 'data').map((t) => {\n    const cf = (gid) => (t.custom_fields || []).find((c) => c.gid === gid);\n    const alert = cf(alertFieldGid);\n    const prio = priorityFieldGid ? cf(priorityFieldGid) : null;\n    return {\n      gid: t.gid,\n      name: t.name,\n      url: t.permalink_url,\n      keys: parseKeys(alert && (alert.text_value ?? alert.display_value)),\n      priority: prio ? ((prio.enum_value && prio.enum_value.name) || prio.display_value || '') : '',\n    };\n  });\n}\n\n// A finding turned into a task without AI (fallback, or update of an already-open task).\nfunction taskFromFinding(f, source) {\n  return {\n    alert_keys: [f.alert_key],\n    title: f.title.slice(0, 120),\n    country: f.country,\n    platform: f.platform,\n    type: RULE_TYPE[f.rule] || 'PERFORMANCE',\n    priority: f.severity,\n    diagnosis: f.summary_line,\n    action_steps: f.suggested_steps || [],\n    expected_impact: '',\n    expected_impact_eur: 0,\n    campaign_id: f.campaign_id || '',\n    source,\n    findings: [f],\n  };\n}\n\n// ---- wf1_config.js ----\n// Settings injected by build.py (config/settings*.json + GAQL from sql/).\nconst S = {\n  \"timezone\": \"Europe/Bratislava\",\n  \"gcp_project\": \"YOUR_GCP_PROJECT\",\n  \"bq_dataset\": \"balabim_ads\",\n  \"bq_location\": \"EU\",\n  \"config_sheet_id\": \"YOUR_GOOGLE_SHEET_ID\",\n  \"gads_api_version\": \"v21\",\n  \"gads_login_customer_id\": \"1234567890\",\n  \"gads_developer_token\": \"YOUR_GOOGLE_ADS_DEVELOPER_TOKEN\",\n  \"meta_api_version\": \"v23.0\",\n  \"meta_purchase_action_types\": [\n    \"omni_purchase\",\n    \"purchase\",\n    \"offsite_conversion.fb_pixel_purchase\"\n  ],\n  \"lookback_days\": 7,\n  \"search_terms_lookback_days\": 30,\n  \"anthropic_model\": \"claude-opus-5\",\n  \"anthropic_effort\": \"medium\",\n  \"max_new_tasks_per_run\": 10,\n  \"alert_email_from\": \"n8n@your-agency.sk\",\n  \"alert_email_to\": \"ppc@your-agency.sk\",\n  \"workflow_ids\": {\n    \"wf3_analyst\": \"REPLACE_AFTER_IMPORT\",\n    \"wf4_asana\": \"REPLACE_AFTER_IMPORT\",\n    \"error\": \"REPLACE_AFTER_IMPORT\"\n  },\n  \"rule_defaults\": {\n    \"pacing_tolerance\": 0.15,\n    \"pacing_min_days\": 5,\n    \"kpi_tolerance\": 0.15,\n    \"wow_drop\": 0.25,\n    \"wow_min_conv\": 5,\n    \"min_spend_7d_eur\": 100,\n    \"min_spend_campaign_7d_eur\": 50,\n    \"max_frequency\": 3.0,\n    \"outage_min_daily_conv\": 3,\n    \"outage_drop\": 0.7,\n    \"scale_lost_is_budget\": 0.2,\n    \"scale_min_conv\": 3,\n    \"search_term_min_cost_eur\": 15\n  },\n  \"asana\": {\n    \"workspace_gid\": \"REPLACE\",\n    \"project_gid\": \"REPLACE\",\n    \"section_new_gid\": \"REPLACE\",\n    \"default_assignee_gid\": \"\",\n    \"due_days\": {\n      \"P1\": 1,\n      \"P2\": 3,\n      \"P3\": 7\n    },\n    \"fields\": {\n      \"country\": {\n        \"gid\": \"REPLACE\",\n        \"options\": {\n          \"SK\": \"\",\n          \"CZ\": \"\",\n          \"HU\": \"\",\n          \"PL\": \"\",\n          \"RO\": \"\",\n          \"BG\": \"\",\n          \"HR\": \"\",\n          \"SI\": \"\",\n          \"GR\": \"\",\n          \"ALL\": \"\"\n        }\n      },\n      \"platform\": {\n        \"gid\": \"REPLACE\",\n        \"options\": {\n          \"GOOGLE_ADS\": \"\",\n          \"META\": \"\",\n          \"BOTH\": \"\"\n        }\n      },\n      \"type\": {\n        \"gid\": \"REPLACE\",\n        \"options\": {\n          \"TRACKING\": \"\",\n          \"BUDGET\": \"\",\n          \"PERFORMANCE\": \"\",\n          \"WASTE\": \"\",\n          \"SCALE\": \"\",\n          \"CREATIVE\": \"\",\n          \"SEARCH_TERMS\": \"\",\n          \"POLICY\": \"\",\n          \"LEARNING\": \"\",\n          \"DATA_QUALITY\": \"\"\n        }\n      },\n      \"priority\": {\n        \"gid\": \"REPLACE\",\n        \"options\": {\n          \"P1\": \"\",\n          \"P2\": \"\",\n          \"P3\": \"\"\n        }\n      },\n      \"alert_id\": {\n        \"gid\": \"REPLACE\"\n      },\n      \"impact\": {\n        \"gid\": \"REPLACE\"\n      }\n    }\n  },\n  \"gaql\": {\n    \"campaigns\": \"SELECT\\n  segments.date,\\n  customer.id,\\n  customer.descriptive_name,\\n  customer.currency_code,\\n  campaign.id,\\n  campaign.name,\\n  campaign.status,\\n  campaign.advertising_channel_type,\\n  campaign.bidding_strategy_type,\\n  campaign.primary_status,\\n  campaign.primary_status_reasons,\\n  campaign_budget.amount_micros,\\n  metrics.cost_micros,\\n  metrics.impressions,\\n  metrics.clicks,\\n  metrics.conversions,\\n  metrics.conversions_value,\\n  metrics.search_impression_share,\\n  metrics.search_budget_lost_impression_share,\\n  metrics.search_rank_lost_impression_share\\nFROM campaign\\nWHERE segments.date BETWEEN '{since}' AND '{until}'\\n  AND campaign.status != 'REMOVED'\\n\",\n    \"search_terms\": \"SELECT\\n  customer.id,\\n  customer.currency_code,\\n  campaign.id,\\n  campaign.name,\\n  ad_group.id,\\n  ad_group.name,\\n  search_term_view.search_term,\\n  metrics.cost_micros,\\n  metrics.clicks,\\n  metrics.conversions,\\n  metrics.conversions_value\\nFROM search_term_view\\nWHERE segments.date BETWEEN '{st_since}' AND '{until}'\\n  AND metrics.cost_micros > 0\\nORDER BY metrics.cost_micros DESC\\nLIMIT 2000\\n\",\n    \"disapproved\": \"SELECT\\n  customer.id,\\n  campaign.id,\\n  campaign.name,\\n  ad_group.id,\\n  ad_group.name,\\n  ad_group_ad.ad.id,\\n  ad_group_ad.ad.name,\\n  ad_group_ad.policy_summary.approval_status\\nFROM ad_group_ad\\nWHERE ad_group_ad.status = 'ENABLED'\\n  AND campaign.status = 'ENABLED'\\n  AND ad_group.status = 'ENABLED'\\n  AND ad_group_ad.policy_summary.approval_status = 'DISAPPROVED'\\n\"\n  }\n};\n\n// $today = start of today in the workflow timezone (Europe/Bratislava).\nconst until = $today.minus({ days: 1 }).toISODate();\nconst since = $today.minus({ days: S.lookback_days }).toISODate();\nconst stSince = $today.minus({ days: S.search_terms_lookback_days }).toISODate();\n// Pull a few extra days of FX so weekends/holidays resolve to the last ECB fixing.\nconst fxFrom = $today.minus({ days: Math.max(S.lookback_days, S.search_terms_lookback_days) + 7 }).toISODate();\n\nconst fill = (q) => q.replaceAll('{since}', since).replaceAll('{until}', until).replaceAll('{st_since}', stSince);\n\nreturn [{\n  json: {\n    ...S,\n    since,\n    until,\n    st_since: stSince,\n    fx_from: fxFrom,\n    gaql_campaigns: fill(S.gaql.campaigns),\n    gaql_search_terms: fill(S.gaql.search_terms),\n    gaql_disapproved: fill(S.gaql.disapproved),\n    meta_time_range: JSON.stringify({ since, until }),\n  },\n}];\n"
+      },
+      "id": "0603bf96-1249-5f4f-848b-6ac75d93e2d3",
+      "name": "Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        280,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.frankfurter.dev/v1/{{ $json.fx_from }}..{{ $json.until }}",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "base",
+              "value": "EUR"
+            },
+            {
+              "name": "symbols",
+              "value": "CZK,HUF,PLN,RON"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "6ff0ce63-76c7-5b25-a613-998c4da94a87",
+      "name": "FX",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "accounts",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "81536cf2-ae33-5c93-b614-3c4b135a0cac",
+      "name": "Accounts",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        840,
+        200
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "REPLACE_ME",
+          "name": "Google Service Account (BigQuery + Sheets)"
+        }
+      },
+      "alwaysOutputData": false,
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shared helpers. build.py prepends this file to every Code node, so keep it\n// free of top-level side effects and never redeclare these names in node code.\nconst COUNTRIES = ['SK', 'CZ', 'HU', 'PL', 'RO', 'BG', 'HR', 'SI', 'GR'];\nconst PLATFORM_LABEL = { GOOGLE_ADS: 'Google Ads', META: 'Meta Ads', BOTH: 'Google + Meta' };\n\n// Accepts numbers, API strings (\"123.45\") and sheet values (\"3,5\", \"1 200 €\").\nfunction num(v) {\n  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;\n  if (v === null || v === undefined || v === '') return 0;\n  const n = Number(String(v).replace(/[\\s€%]/g, '').replace(',', '.'));\n  return Number.isFinite(n) ? n : 0;\n}\nconst round = (v, d = 2) => Math.round(num(v) * 10 ** d) / 10 ** d;\nconst safeDiv = (a, b) => (num(b) === 0 ? null : num(a) / num(b));\nconst pct = (v) => (v === null || v === undefined ? 'n/a' : `${round(v * 100, 1)} %`);\nconst eur = (v) => `${round(v, 0).toLocaleString('sk-SK')} €`;\nconst fmt = (v, d = 2) => (v === null || v === undefined ? 'n/a' : String(round(v, d)));\nconst normId = (id) => String(id ?? '').replace(/^act_/, '').replace(/-/g, '').trim();\nconst isActive = (v) => !['FALSE', 'NIE', '0', 'NO'].includes(String(v ?? 'TRUE').trim().toUpperCase());\n\n// Country from campaign name: SK_Search_Brand, \"PMax | HU | Feed\", \"Meta-RO-Prospecting\"...\nfunction countryFromName(name) {\n  const m = String(name || '').toUpperCase().match(/(?:^|[^A-Z])(SK|CZ|HU|PL|RO|BG|HR|SI|GR)(?=[^A-Z]|$)/);\n  return m ? m[1] : 'UNKNOWN';\n}\n\n// Rows of the \"accounts\" sheet -> { 'GOOGLE_ADS|1234567890': {country, currency, name} }\nfunction buildAccountMap(items) {\n  const map = {};\n  for (const { json: r } of items) {\n    if (!isActive(r.active)) continue;\n    const platform = String(r.platform || '').trim().toUpperCase();\n    map[`${platform}|${normId(r.account_id)}`] = {\n      country: String(r.country || '').trim().toUpperCase(),\n      currency: String(r.currency || '').trim().toUpperCase(),\n      name: r.account_name || '',\n    };\n  }\n  return map;\n}\n\n// Account-level country wins; accounts marked MULTI fall back to the campaign name.\nfunction resolveCountry(accountMap, platform, accountId, campaignName) {\n  const acc = accountMap[`${platform}|${normId(accountId)}`];\n  if (acc && COUNTRIES.includes(acc.country)) return acc.country;\n  return countryFromName(campaignName);\n}\n\n// fx = Frankfurter time series response {rates: {'YYYY-MM-DD': {CZK: 24.3, ...}}}, base EUR.\n// Returns units of `currency` per 1 EUR, using the latest rate on or before `date`.\nfunction fxRate(fx, currency, date) {\n  const cur = String(currency || 'EUR').toUpperCase();\n  if (cur === 'EUR') return 1;\n  if (cur === 'BGN') return 1.95583; // fixed conversion rate, BG uses EUR since 2026-01-01\n  const rates = (fx && fx.rates) || {};\n  const dates = Object.keys(rates).sort();\n  let rate = null;\n  for (const d of dates) if (d <= date && rates[d][cur]) rate = rates[d][cur];\n  if (rate === null) for (const d of dates) if (rates[d][cur]) { rate = rates[d][cur]; break; }\n  if (!rate) throw new Error(`Chýba kurz ECB pre ${cur} k ${date}`);\n  return rate;\n}\n\n// n8n HTTP node may emit one item per array element or one item wrapping the array.\nfunction unwrap(items, key) {\n  const out = [];\n  for (const { json } of items) {\n    const parts = Array.isArray(json) ? json : [json];\n    for (const p of parts) {\n      if (p && Array.isArray(p[key])) out.push(...p[key]);\n    }\n  }\n  return out;\n}\n\n// Rule -> Asana task type (used when a task is built from a finding without AI).\nconst RULE_TYPE = {\n  TRACKING_OUTAGE: 'TRACKING', NO_DATA: 'DATA_QUALITY', UNMAPPED: 'DATA_QUALITY',\n  PACING_OVER: 'BUDGET', PACING_UNDER: 'BUDGET',\n  KPI_BELOW_TARGET: 'PERFORMANCE', KPI_WOW_DROP: 'PERFORMANCE', CAMPAIGN_DROP: 'PERFORMANCE',\n  WASTE_NO_CONV: 'WASTE', SCALE_BUDGET: 'SCALE', CREATIVE_FATIGUE: 'CREATIVE',\n  SEARCH_TERMS: 'SEARCH_TERMS', POLICY: 'POLICY', LEARNING_LIMITED: 'LEARNING',\n};\nconst PRIORITY_ORDER = { P1: 0, P2: 1, P3: 2 };\n\n// BigQuery nodes run with \"Always Output Data\", so an empty result is one empty item.\nconst rows = (items) => items.map((i) => i.json).filter((j) => j && Object.keys(j).length > 0);\n\n// Alert-ID custom field text -> Set of alert keys.\nconst parseKeys = (text) => new Set(String(text || '').split(/[\\s,;]+/).map((s) => s.trim()).filter(Boolean));\n\n// Open tasks of the Asana project (paginated HTTP output) -> [{gid, name, url, keys:Set, priority}]\nfunction openTasks(items, alertFieldGid, priorityFieldGid) {\n  return unwrap(items, 'data').map((t) => {\n    const cf = (gid) => (t.custom_fields || []).find((c) => c.gid === gid);\n    const alert = cf(alertFieldGid);\n    const prio = priorityFieldGid ? cf(priorityFieldGid) : null;\n    return {\n      gid: t.gid,\n      name: t.name,\n      url: t.permalink_url,\n      keys: parseKeys(alert && (alert.text_value ?? alert.display_value)),\n      priority: prio ? ((prio.enum_value && prio.enum_value.name) || prio.display_value || '') : '',\n    };\n  });\n}\n\n// A finding turned into a task without AI (fallback, or update of an already-open task).\nfunction taskFromFinding(f, source) {\n  return {\n    alert_keys: [f.alert_key],\n    title: f.title.slice(0, 120),\n    country: f.country,\n    platform: f.platform,\n    type: RULE_TYPE[f.rule] || 'PERFORMANCE',\n    priority: f.severity,\n    diagnosis: f.summary_line,\n    action_steps: f.suggested_steps || [],\n    expected_impact: '',\n    expected_impact_eur: 0,\n    campaign_id: f.campaign_id || '',\n    source,\n    findings: [f],\n  };\n}\n\n// ---- wf1_norm_fx.js ----\n// Frankfurter time series -> fx_rates rows (audit trail of rates used for conversion).\nconst fx = $('FX').first().json;\nconst ingested = new Date().toISOString();\nconst out = [];\nfor (const [date, rates] of Object.entries(fx.rates || {})) {\n  for (const [currency, rate] of Object.entries(rates)) {\n    out.push({ json: { date, currency, rate_per_eur: rate, ingested_at: ingested } });\n  }\n}\nreturn out;\n"
+      },
+      "id": "69355cb1-8036-5fbc-93e0-c2dc75da1815",
+      "name": "Normalize FX",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        840,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "insert",
+        "projectId": {
+          "__rl": true,
+          "value": "YOUR_GCP_PROJECT",
+          "mode": "id"
+        },
+        "datasetId": {
+          "__rl": true,
+          "value": "balabim_ads",
+          "mode": "id"
+        },
+        "tableId": {
+          "__rl": true,
+          "value": "fx_rates",
+          "mode": "id"
+        },
+        "dataMode": "autoMap",
+        "options": {}
+      },
+      "id": "ac5978e3-1c38-5c3c-8b0c-3788144de8c2",
+      "name": "BQ fx_rates",
+      "type": "n8n-nodes-base.googleBigQuery",
+      "typeVersion": 2.1,
+      "position": [
+        1120,
+        -200
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "REPLACE_ME",
+          "name": "Google Service Account (BigQuery + Sheets)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shared helpers. build.py prepends this file to every Code node, so keep it\n// free of top-level side effects and never redeclare these names in node code.\nconst COUNTRIES = ['SK', 'CZ', 'HU', 'PL', 'RO', 'BG', 'HR', 'SI', 'GR'];\nconst PLATFORM_LABEL = { GOOGLE_ADS: 'Google Ads', META: 'Meta Ads', BOTH: 'Google + Meta' };\n\n// Accepts numbers, API strings (\"123.45\") and sheet values (\"3,5\", \"1 200 €\").\nfunction num(v) {\n  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;\n  if (v === null || v === undefined || v === '') return 0;\n  const n = Number(String(v).replace(/[\\s€%]/g, '').replace(',', '.'));\n  return Number.isFinite(n) ? n : 0;\n}\nconst round = (v, d = 2) => Math.round(num(v) * 10 ** d) / 10 ** d;\nconst safeDiv = (a, b) => (num(b) === 0 ? null : num(a) / num(b));\nconst pct = (v) => (v === null || v === undefined ? 'n/a' : `${round(v * 100, 1)} %`);\nconst eur = (v) => `${round(v, 0).toLocaleString('sk-SK')} €`;\nconst fmt = (v, d = 2) => (v === null || v === undefined ? 'n/a' : String(round(v, d)));\nconst normId = (id) => String(id ?? '').replace(/^act_/, '').replace(/-/g, '').trim();\nconst isActive = (v) => !['FALSE', 'NIE', '0', 'NO'].includes(String(v ?? 'TRUE').trim().toUpperCase());\n\n// Country from campaign name: SK_Search_Brand, \"PMax | HU | Feed\", \"Meta-RO-Prospecting\"...\nfunction countryFromName(name) {\n  const m = String(name || '').toUpperCase().match(/(?:^|[^A-Z])(SK|CZ|HU|PL|RO|BG|HR|SI|GR)(?=[^A-Z]|$)/);\n  return m ? m[1] : 'UNKNOWN';\n}\n\n// Rows of the \"accounts\" sheet -> { 'GOOGLE_ADS|1234567890': {country, currency, name} }\nfunction buildAccountMap(items) {\n  const map = {};\n  for (const { json: r } of items) {\n    if (!isActive(r.active)) continue;\n    const platform = String(r.platform || '').trim().toUpperCase();\n    map[`${platform}|${normId(r.account_id)}`] = {\n      country: String(r.country || '').trim().toUpperCase(),\n      currency: String(r.currency || '').trim().toUpperCase(),\n      name: r.account_name || '',\n    };\n  }\n  return map;\n}\n\n// Account-level country wins; accounts marked MULTI fall back to the campaign name.\nfunction resolveCountry(accountMap, platform, accountId, campaignName) {\n  const acc = accountMap[`${platform}|${normId(accountId)}`];\n  if (acc && COUNTRIES.includes(acc.country)) return acc.country;\n  return countryFromName(campaignName);\n}\n\n// fx = Frankfurter time series response {rates: {'YYYY-MM-DD': {CZK: 24.3, ...}}}, base EUR.\n// Returns units of `currency` per 1 EUR, using the latest rate on or before `date`.\nfunction fxRate(fx, currency, date) {\n  const cur = String(currency || 'EUR').toUpperCase();\n  if (cur === 'EUR') return 1;\n  if (cur === 'BGN') return 1.95583; // fixed conversion rate, BG uses EUR since 2026-01-01\n  const rates = (fx && fx.rates) || {};\n  const dates = Object.keys(rates).sort();\n  let rate = null;\n  for (const d of dates) if (d <= date && rates[d][cur]) rate = rates[d][cur];\n  if (rate === null) for (const d of dates) if (rates[d][cur]) { rate = rates[d][cur]; break; }\n  if (!rate) throw new Error(`Chýba kurz ECB pre ${cur} k ${date}`);\n  return rate;\n}\n\n// n8n HTTP node may emit one item per array element or one item wrapping the array.\nfunction unwrap(items, key) {\n  const out = [];\n  for (const { json } of items) {\n    const parts = Array.isArray(json) ? json : [json];\n    for (const p of parts) {\n      if (p && Array.isArray(p[key])) out.push(...p[key]);\n    }\n  }\n  return out;\n}\n\n// Rule -> Asana task type (used when a task is built from a finding without AI).\nconst RULE_TYPE = {\n  TRACKING_OUTAGE: 'TRACKING', NO_DATA: 'DATA_QUALITY', UNMAPPED: 'DATA_QUALITY',\n  PACING_OVER: 'BUDGET', PACING_UNDER: 'BUDGET',\n  KPI_BELOW_TARGET: 'PERFORMANCE', KPI_WOW_DROP: 'PERFORMANCE', CAMPAIGN_DROP: 'PERFORMANCE',\n  WASTE_NO_CONV: 'WASTE', SCALE_BUDGET: 'SCALE', CREATIVE_FATIGUE: 'CREATIVE',\n  SEARCH_TERMS: 'SEARCH_TERMS', POLICY: 'POLICY', LEARNING_LIMITED: 'LEARNING',\n};\nconst PRIORITY_ORDER = { P1: 0, P2: 1, P3: 2 };\n\n// BigQuery nodes run with \"Always Output Data\", so an empty result is one empty item.\nconst rows = (items) => items.map((i) => i.json).filter((j) => j && Object.keys(j).length > 0);\n\n// Alert-ID custom field text -> Set of alert keys.\nconst parseKeys = (text) => new Set(String(text || '').split(/[\\s,;]+/).map((s) => s.trim()).filter(Boolean));\n\n// Open tasks of the Asana project (paginated HTTP output) -> [{gid, name, url, keys:Set, priority}]\nfunction openTasks(items, alertFieldGid, priorityFieldGid) {\n  return unwrap(items, 'data').map((t) => {\n    const cf = (gid) => (t.custom_fields || []).find((c) => c.gid === gid);\n    const alert = cf(alertFieldGid);\n    const prio = priorityFieldGid ? cf(priorityFieldGid) : null;\n    return {\n      gid: t.gid,\n      name: t.name,\n      url: t.permalink_url,\n      keys: parseKeys(alert && (alert.text_value ?? alert.display_value)),\n      priority: prio ? ((prio.enum_value && prio.enum_value.name) || prio.display_value || '') : '',\n    };\n  });\n}\n\n// A finding turned into a task without AI (fallback, or update of an already-open task).\nfunction taskFromFinding(f, source) {\n  return {\n    alert_keys: [f.alert_key],\n    title: f.title.slice(0, 120),\n    country: f.country,\n    platform: f.platform,\n    type: RULE_TYPE[f.rule] || 'PERFORMANCE',\n    priority: f.severity,\n    diagnosis: f.summary_line,\n    action_steps: f.suggested_steps || [],\n    expected_impact: '',\n    expected_impact_eur: 0,\n    campaign_id: f.campaign_id || '',\n    source,\n    findings: [f],\n  };\n}\n\n// ---- wf1_filter_google.js ----\nreturn $input.all().filter((i) =>\n  String(i.json.platform || '').trim().toUpperCase() === 'GOOGLE_ADS' && isActive(i.json.active) && i.json.account_id);\n"
+      },
+      "id": "55e650d0-db93-564c-a626-7bbcb1e2251b",
+      "name": "Google Accounts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://googleads.googleapis.com/{{ $('Config').first().json.gads_api_version }}/customers/{{ String($json.account_id).replace(/-/g, '') }}/googleAds:searchStream",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleAdsOAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "developer-token",
+              "value": "={{ $('Config').first().json.gads_developer_token }}"
+            },
+            {
+              "name": "login-customer-id",
+              "value": "={{ String($('Config').first().json.gads_login_customer_id).replace(/-/g, '') }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ query: $('Config').first().json.gaql_campaigns }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "0eea524c-478e-50b1-a1ae-781221467d21",
+      "name": "GAds Campaigns",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1400,
+        0
+      ],
+      "credentials": {
+        "googleAdsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Google Ads OAuth (MCC)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shared helpers. build.py prepends this file to every Code node, so keep it\n// free of top-level side effects and never redeclare these names in node code.\nconst COUNTRIES = ['SK', 'CZ', 'HU', 'PL', 'RO', 'BG', 'HR', 'SI', 'GR'];\nconst PLATFORM_LABEL = { GOOGLE_ADS: 'Google Ads', META: 'Meta Ads', BOTH: 'Google + Meta' };\n\n// Accepts numbers, API strings (\"123.45\") and sheet values (\"3,5\", \"1 200 €\").\nfunction num(v) {\n  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;\n  if (v === null || v === undefined || v === '') return 0;\n  const n = Number(String(v).replace(/[\\s€%]/g, '').replace(',', '.'));\n  return Number.isFinite(n) ? n : 0;\n}\nconst round = (v, d = 2) => Math.round(num(v) * 10 ** d) / 10 ** d;\nconst safeDiv = (a, b) => (num(b) === 0 ? null : num(a) / num(b));\nconst pct = (v) => (v === null || v === undefined ? 'n/a' : `${round(v * 100, 1)} %`);\nconst eur = (v) => `${round(v, 0).toLocaleString('sk-SK')} €`;\nconst fmt = (v, d = 2) => (v === null || v === undefined ? 'n/a' : String(round(v, d)));\nconst normId = (id) => String(id ?? '').replace(/^act_/, '').replace(/-/g, '').trim();\nconst isActive = (v) => !['FALSE', 'NIE', '0', 'NO'].includes(String(v ?? 'TRUE').trim().toUpperCase());\n\n// Country from campaign name: SK_Search_Brand, \"PMax | HU | Feed\", \"Meta-RO-Prospecting\"...\nfunction countryFromName(name) {\n  const m = String(name || '').toUpperCase().match(/(?:^|[^A-Z])(SK|CZ|HU|PL|RO|BG|HR|SI|GR)(?=[^A-Z]|$)/);\n  return m ? m[1] : 'UNKNOWN';\n}\n\n// Rows of the \"accounts\" sheet -> { 'GOOGLE_ADS|1234567890': {country, currency, name} }\nfunction buildAccountMap(items) {\n  const map = {};\n  for (const { json: r } of items) {\n    if (!isActive(r.active)) continue;\n    const platform = String(r.platform || '').trim().toUpperCase();\n    map[`${platform}|${normId(r.account_id)}`] = {\n      country: String(r.country || '').trim().toUpperCase(),\n      currency: String(r.currency || '').trim().toUpperCase(),\n      name: r.account_name || '',\n    };\n  }\n  return map;\n}\n\n// Account-level country wins; accounts marked MULTI fall back to the campaign name.\nfunction resolveCountry(accountMap, platform, accountId, campaignName) {\n  const acc = accountMap[`${platform}|${normId(accountId)}`];\n  if (acc && COUNTRIES.includes(acc.country)) return acc.country;\n  return countryFromName(campaignName);\n}\n\n// fx = Frankfurter time series response {rates: {'YYYY-MM-DD': {CZK: 24.3, ...}}}, base EUR.\n// Returns units of `currency` per 1 EUR, using the latest rate on or before `date`.\nfunction fxRate(fx, currency, date) {\n  const cur = String(currency || 'EUR').toUpperCase();\n  if (cur === 'EUR') return 1;\n  if (cur === 'BGN') return 1.95583; // fixed conversion rate, BG uses EUR since 2026-01-01\n  const rates = (fx && fx.rates) || {};\n  const dates = Object.keys(rates).sort();\n  let rate = null;\n  for (const d of dates) if (d <= date && rates[d][cur]) rate = rates[d][cur];\n  if (rate === null) for (const d of dates) if (rates[d][cur]) { rate = rates[d][cur]; break; }\n  if (!rate) throw new Error(`Chýba kurz ECB pre ${cur} k ${date}`);\n  return rate;\n}\n\n// n8n HTTP node may emit one item per array element or one item wrapping the array.\nfunction unwrap(items, key) {\n  const out = [];\n  for (const { json } of items) {\n    const parts = Array.isArray(json) ? json : [json];\n    for (const p of parts) {\n      if (p && Array.isArray(p[key])) out.push(...p[key]);\n    }\n  }\n  return out;\n}\n\n// Rule -> Asana task type (used when a task is built from a finding without AI).\nconst RULE_TYPE = {\n  TRACKING_OUTAGE: 'TRACKING', NO_DATA: 'DATA_QUALITY', UNMAPPED: 'DATA_QUALITY',\n  PACING_OVER: 'BUDGET', PACING_UNDER: 'BUDGET',\n  KPI_BELOW_TARGET: 'PERFORMANCE', KPI_WOW_DROP: 'PERFORMANCE', CAMPAIGN_DROP: 'PERFORMANCE',\n  WASTE_NO_CONV: 'WASTE', SCALE_BUDGET: 'SCALE', CREATIVE_FATIGUE: 'CREATIVE',\n  SEARCH_TERMS: 'SEARCH_TERMS', POLICY: 'POLICY', LEARNING_LIMITED: 'LEARNING',\n};\nconst PRIORITY_ORDER = { P1: 0, P2: 1, P3: 2 };\n\n// BigQuery nodes run with \"Always Output Data\", so an empty result is one empty item.\nconst rows = (items) => items.map((i) => i.json).filter((j) => j && Object.keys(j).length > 0);\n\n// Alert-ID custom field text -> Set of alert keys.\nconst parseKeys = (text) => new Set(String(text || '').split(/[\\s,;]+/).map((s) => s.trim()).filter(Boolean));\n\n// Open tasks of the Asana project (paginated HTTP output) -> [{gid, name, url, keys:Set, priority}]\nfunction openTasks(items, alertFieldGid, priorityFieldGid) {\n  return unwrap(items, 'data').map((t) => {\n    const cf = (gid) => (t.custom_fields || []).find((c) => c.gid === gid);\n    const alert = cf(alertFieldGid);\n    const prio = priorityFieldGid ? cf(priorityFieldGid) : null;\n    return {\n      gid: t.gid,\n      name: t.name,\n      url: t.permalink_url,\n      keys: parseKeys(alert && (alert.text_value ?? alert.display_value)),\n      priority: prio ? ((prio.enum_value && prio.enum_value.name) || prio.display_value || '') : '',\n    };\n  });\n}\n\n// A finding turned into a task without AI (fallback, or update of an already-open task).\nfunction taskFromFinding(f, source) {\n  return {\n    alert_keys: [f.alert_key],\n    title: f.title.slice(0, 120),\n    country: f.country,\n    platform: f.platform,\n    type: RULE_TYPE[f.rule] || 'PERFORMANCE',\n    priority: f.severity,\n    diagnosis: f.summary_line,\n    action_steps: f.suggested_steps || [],\n    expected_impact: '',\n    expected_impact_eur: 0,\n    campaign_id: f.campaign_id || '',\n    source,\n    findings: [f],\n  };\n}\n\n// ---- wf1_norm_gads_perf.js ----\n// Google Ads searchStream (campaign × day) -> daily_perf rows in EUR.\nconst fx = $('FX').first().json;\nconst accountMap = buildAccountMap($('Accounts').all());\nconst ingested = new Date().toISOString();\nconst out = [];\n\nfor (const r of unwrap($input.all(), 'results')) {\n  const date = r.segments.date;\n  const currency = r.customer.currencyCode;\n  const rate = fxRate(fx, currency, date);\n  const m = r.metrics || {};\n  const c = r.campaign || {};\n  const isShare = (v) => (v === undefined || v === null ? null : num(v));\n  out.push({\n    json: {\n      date,\n      platform: 'GOOGLE_ADS',\n      account_id: normId(r.customer.id),\n      account_name: r.customer.descriptiveName || '',\n      country: resolveCountry(accountMap, 'GOOGLE_ADS', r.customer.id, c.name),\n      campaign_id: String(c.id),\n      campaign_name: c.name || '',\n      campaign_type: c.advertisingChannelType || '',\n      campaign_status: c.status || '',\n      adset_id: null,\n      adset_name: null,\n      currency,\n      fx_rate: rate,\n      cost_eur: round(num(m.costMicros) / 1e6 / rate, 4),\n      impressions: Math.round(num(m.impressions)),\n      clicks: Math.round(num(m.clicks)),\n      reach: null,\n      conversions: round(num(m.conversions), 4),\n      conv_value_eur: round(num(m.conversionsValue) / rate, 4),\n      search_is: isShare(m.searchImpressionShare),\n      search_lost_is_budget: isShare(m.searchBudgetLostImpressionShare),\n      search_lost_is_rank: isShare(m.searchRankLostImpressionShare),\n      budget_daily_eur: r.campaignBudget ? round(num(r.campaignBudget.amountMicros) / 1e6 / rate, 2) : null,\n      bidding_strategy: c.biddingStrategyType || '',\n      primary_status: c.primaryStatus || '',\n      primary_status_reasons: (c.primaryStatusReasons || []).join(','),\n      ingested_at: ingested,\n    },\n  });\n}\nreturn out;\n"
+      },
+      "id": "79a1bce9-0ce5-59fc-964c-981f3c5351ea",
+      "name": "Normalize GAds Perf",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "insert",
+        "projectId": {
+          "__rl": true,
+          "value": "YOUR_GCP_PROJECT",
+          "mode": "id"
+        },
+        "datasetId": {
+          "__rl": true,
+          "value": "balabim_ads",
+          "mode": "id"
+        },
+        "tableId": {
+          "__rl": true,
+          "value": "daily_perf",
+          "mode": "id"
+        },
+        "dataMode": "autoMap",
+        "options": {}
+      },
+      "id": "453232ae-e166-527a-ab13-f82fbeba3dfc",
+      "name": "BQ daily_perf (Google)",
+      "type": "n8n-nodes-base.googleBigQuery",
+      "typeVersion": 2.1,
+      "position": [
+        1960,
+        0
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "REPLACE_ME",
+          "name": "Google Service Account (BigQuery + Sheets)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://googleads.googleapis.com/{{ $('Config').first().json.gads_api_version }}/customers/{{ String($json.account_id).replace(/-/g, '') }}/googleAds:searchStream",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleAdsOAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "developer-token",
+              "value": "={{ $('Config').first().json.gads_developer_token }}"
+            },
+            {
+              "name": "login-customer-id",
+              "value": "={{ String($('Config').first().json.gads_login_customer_id).replace(/-/g, '') }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ query: $('Config').first().json.gaql_search_terms }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "94ba4acf-7986-5d85-88fe-6c816f87221a",
+      "name": "GAds Search Terms",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1400,
+        200
+      ],
+      "credentials": {
+        "googleAdsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Google Ads OAuth (MCC)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shared helpers. build.py prepends this file to every Code node, so keep it\n// free of top-level side effects and never redeclare these names in node code.\nconst COUNTRIES = ['SK', 'CZ', 'HU', 'PL', 'RO', 'BG', 'HR', 'SI', 'GR'];\nconst PLATFORM_LABEL = { GOOGLE_ADS: 'Google Ads', META: 'Meta Ads', BOTH: 'Google + Meta' };\n\n// Accepts numbers, API strings (\"123.45\") and sheet values (\"3,5\", \"1 200 €\").\nfunction num(v) {\n  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;\n  if (v === null || v === undefined || v === '') return 0;\n  const n = Number(String(v).replace(/[\\s€%]/g, '').replace(',', '.'));\n  return Number.isFinite(n) ? n : 0;\n}\nconst round = (v, d = 2) => Math.round(num(v) * 10 ** d) / 10 ** d;\nconst safeDiv = (a, b) => (num(b) === 0 ? null : num(a) / num(b));\nconst pct = (v) => (v === null || v === undefined ? 'n/a' : `${round(v * 100, 1)} %`);\nconst eur = (v) => `${round(v, 0).toLocaleString('sk-SK')} €`;\nconst fmt = (v, d = 2) => (v === null || v === undefined ? 'n/a' : String(round(v, d)));\nconst normId = (id) => String(id ?? '').replace(/^act_/, '').replace(/-/g, '').trim();\nconst isActive = (v) => !['FALSE', 'NIE', '0', 'NO'].includes(String(v ?? 'TRUE').trim().toUpperCase());\n\n// Country from campaign name: SK_Search_Brand, \"PMax | HU | Feed\", \"Meta-RO-Prospecting\"...\nfunction countryFromName(name) {\n  const m = String(name || '').toUpperCase().match(/(?:^|[^A-Z])(SK|CZ|HU|PL|RO|BG|HR|SI|GR)(?=[^A-Z]|$)/);\n  return m ? m[1] : 'UNKNOWN';\n}\n\n// Rows of the \"accounts\" sheet -> { 'GOOGLE_ADS|1234567890': {country, currency, name} }\nfunction buildAccountMap(items) {\n  const map = {};\n  for (const { json: r } of items) {\n    if (!isActive(r.active)) continue;\n    const platform = String(r.platform || '').trim().toUpperCase();\n    map[`${platform}|${normId(r.account_id)}`] = {\n      country: String(r.country || '').trim().toUpperCase(),\n      currency: String(r.currency || '').trim().toUpperCase(),\n      name: r.account_name || '',\n    };\n  }\n  return map;\n}\n\n// Account-level country wins; accounts marked MULTI fall back to the campaign name.\nfunction resolveCountry(accountMap, platform, accountId, campaignName) {\n  const acc = accountMap[`${platform}|${normId(accountId)}`];\n  if (acc && COUNTRIES.includes(acc.country)) return acc.country;\n  return countryFromName(campaignName);\n}\n\n// fx = Frankfurter time series response {rates: {'YYYY-MM-DD': {CZK: 24.3, ...}}}, base EUR.\n// Returns units of `currency` per 1 EUR, using the latest rate on or before `date`.\nfunction fxRate(fx, currency, date) {\n  const cur = String(currency || 'EUR').toUpperCase();\n  if (cur === 'EUR') return 1;\n  if (cur === 'BGN') return 1.95583; // fixed conversion rate, BG uses EUR since 2026-01-01\n  const rates = (fx && fx.rates) || {};\n  const dates = Object.keys(rates).sort();\n  let rate = null;\n  for (const d of dates) if (d <= date && rates[d][cur]) rate = rates[d][cur];\n  if (rate === null) for (const d of dates) if (rates[d][cur]) { rate = rates[d][cur]; break; }\n  if (!rate) throw new Error(`Chýba kurz ECB pre ${cur} k ${date}`);\n  return rate;\n}\n\n// n8n HTTP node may emit one item per array element or one item wrapping the array.\nfunction unwrap(items, key) {\n  const out = [];\n  for (const { json } of items) {\n    const parts = Array.isArray(json) ? json : [json];\n    for (const p of parts) {\n      if (p && Array.isArray(p[key])) out.push(...p[key]);\n    }\n  }\n  return out;\n}\n\n// Rule -> Asana task type (used when a task is built from a finding without AI).\nconst RULE_TYPE = {\n  TRACKING_OUTAGE: 'TRACKING', NO_DATA: 'DATA_QUALITY', UNMAPPED: 'DATA_QUALITY',\n  PACING_OVER: 'BUDGET', PACING_UNDER: 'BUDGET',\n  KPI_BELOW_TARGET: 'PERFORMANCE', KPI_WOW_DROP: 'PERFORMANCE', CAMPAIGN_DROP: 'PERFORMANCE',\n  WASTE_NO_CONV: 'WASTE', SCALE_BUDGET: 'SCALE', CREATIVE_FATIGUE: 'CREATIVE',\n  SEARCH_TERMS: 'SEARCH_TERMS', POLICY: 'POLICY', LEARNING_LIMITED: 'LEARNING',\n};\nconst PRIORITY_ORDER = { P1: 0, P2: 1, P3: 2 };\n\n// BigQuery nodes run with \"Always Output Data\", so an empty result is one empty item.\nconst rows = (items) => items.map((i) => i.json).filter((j) => j && Object.keys(j).length > 0);\n\n// Alert-ID custom field text -> Set of alert keys.\nconst parseKeys = (text) => new Set(String(text || '').split(/[\\s,;]+/).map((s) => s.trim()).filter(Boolean));\n\n// Open tasks of the Asana project (paginated HTTP output) -> [{gid, name, url, keys:Set, priority}]\nfunction openTasks(items, alertFieldGid, priorityFieldGid) {\n  return unwrap(items, 'data').map((t) => {\n    const cf = (gid) => (t.custom_fields || []).find((c) => c.gid === gid);\n    const alert = cf(alertFieldGid);\n    const prio = priorityFieldGid ? cf(priorityFieldGid) : null;\n    return {\n      gid: t.gid,\n      name: t.name,\n      url: t.permalink_url,\n      keys: parseKeys(alert && (alert.text_value ?? alert.display_value)),\n      priority: prio ? ((prio.enum_value && prio.enum_value.name) || prio.display_value || '') : '',\n    };\n  });\n}\n\n// A finding turned into a task without AI (fallback, or update of an already-open task).\nfunction taskFromFinding(f, source) {\n  return {\n    alert_keys: [f.alert_key],\n    title: f.title.slice(0, 120),\n    country: f.country,\n    platform: f.platform,\n    type: RULE_TYPE[f.rule] || 'PERFORMANCE',\n    priority: f.severity,\n    diagnosis: f.summary_line,\n    action_steps: f.suggested_steps || [],\n    expected_impact: '',\n    expected_impact_eur: 0,\n    campaign_id: f.campaign_id || '',\n    source,\n    findings: [f],\n  };\n}\n\n// ---- wf1_norm_gads_st.js ----\n// Google Ads search terms (aggregated over the lookback window) -> search_terms rows.\nconst cfg = $('Config').first().json;\nconst fx = $('FX').first().json;\nconst accountMap = buildAccountMap($('Accounts').all());\nconst ingested = new Date().toISOString();\nconst out = [];\n\nfor (const r of unwrap($input.all(), 'results')) {\n  const rate = fxRate(fx, r.customer.currencyCode, cfg.until);\n  const m = r.metrics || {};\n  out.push({\n    json: {\n      snapshot_date: cfg.until,\n      period_start: cfg.st_since,\n      platform: 'GOOGLE_ADS',\n      account_id: normId(r.customer.id),\n      country: resolveCountry(accountMap, 'GOOGLE_ADS', r.customer.id, r.campaign.name),\n      campaign_id: String(r.campaign.id),\n      campaign_name: r.campaign.name || '',\n      ad_group_id: String(r.adGroup.id),\n      ad_group_name: r.adGroup.name || '',\n      search_term: r.searchTermView.searchTerm,\n      cost_eur: round(num(m.costMicros) / 1e6 / rate, 4),\n      clicks: Math.round(num(m.clicks)),\n      conversions: round(num(m.conversions), 4),\n      conv_value_eur: round(num(m.conversionsValue) / rate, 4),\n      ingested_at: ingested,\n    },\n  });\n}\nreturn out;\n"
+      },
+      "id": "413a8036-b9da-5bff-9b30-d8fb60ca0f6c",
+      "name": "Normalize GAds Search Terms",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "insert",
+        "projectId": {
+          "__rl": true,
+          "value": "YOUR_GCP_PROJECT",
+          "mode": "id"
+        },
+        "datasetId": {
+          "__rl": true,
+          "value": "balabim_ads",
+          "mode": "id"
+        },
+        "tableId": {
+          "__rl": true,
+          "value": "search_terms",
+          "mode": "id"
+        },
+        "dataMode": "autoMap",
+        "options": {}
+      },
+      "id": "3ef7af90-7ecc-5493-820b-5598f0712fe2",
+      "name": "BQ search_terms (Google)",
+      "type": "n8n-nodes-base.googleBigQuery",
+      "typeVersion": 2.1,
+      "position": [
+        1960,
+        200
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "REPLACE_ME",
+          "name": "Google Service Account (BigQuery + Sheets)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://googleads.googleapis.com/{{ $('Config').first().json.gads_api_version }}/customers/{{ String($json.account_id).replace(/-/g, '') }}/googleAds:searchStream",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleAdsOAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "developer-token",
+              "value": "={{ $('Config').first().json.gads_developer_token }}"
+            },
+            {
+              "name": "login-customer-id",
+              "value": "={{ String($('Config').first().json.gads_login_customer_id).replace(/-/g, '') }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ query: $('Config').first().json.gaql_disapproved }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "39b8f20d-ead9-56a8-a225-5f1784dea9c2",
+      "name": "GAds Disapproved Ads",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1400,
+        400
+      ],
+      "credentials": {
+        "googleAdsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Google Ads OAuth (MCC)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shared helpers. build.py prepends this file to every Code node, so keep it\n// free of top-level side effects and never redeclare these names in node code.\nconst COUNTRIES = ['SK', 'CZ', 'HU', 'PL', 'RO', 'BG', 'HR', 'SI', 'GR'];\nconst PLATFORM_LABEL = { GOOGLE_ADS: 'Google Ads', META: 'Meta Ads', BOTH: 'Google + Meta' };\n\n// Accepts numbers, API strings (\"123.45\") and sheet values (\"3,5\", \"1 200 €\").\nfunction num(v) {\n  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;\n  if (v === null || v === undefined || v === '') return 0;\n  const n = Number(String(v).replace(/[\\s€%]/g, '').replace(',', '.'));\n  return Number.isFinite(n) ? n : 0;\n}\nconst round = (v, d = 2) => Math.round(num(v) * 10 ** d) / 10 ** d;\nconst safeDiv = (a, b) => (num(b) === 0 ? null : num(a) / num(b));\nconst pct = (v) => (v === null || v === undefined ? 'n/a' : `${round(v * 100, 1)} %`);\nconst eur = (v) => `${round(v, 0).toLocaleString('sk-SK')} €`;\nconst fmt = (v, d = 2) => (v === null || v === undefined ? 'n/a' : String(round(v, d)));\nconst normId = (id) => String(id ?? '').replace(/^act_/, '').replace(/-/g, '').trim();\nconst isActive = (v) => !['FALSE', 'NIE', '0', 'NO'].includes(String(v ?? 'TRUE').trim().toUpperCase());\n\n// Country from campaign name: SK_Search_Brand, \"PMax | HU | Feed\", \"Meta-RO-Prospecting\"...\nfunction countryFromName(name) {\n  const m = String(name || '').toUpperCase().match(/(?:^|[^A-Z])(SK|CZ|HU|PL|RO|BG|HR|SI|GR)(?=[^A-Z]|$)/);\n  return m ? m[1] : 'UNKNOWN';\n}\n\n// Rows of the \"accounts\" sheet -> { 'GOOGLE_ADS|1234567890': {country, currency, name} }\nfunction buildAccountMap(items) {\n  const map = {};\n  for (const { json: r } of items) {\n    if (!isActive(r.active)) continue;\n    const platform = String(r.platform || '').trim().toUpperCase();\n    map[`${platform}|${normId(r.account_id)}`] = {\n      country: String(r.country || '').trim().toUpperCase(),\n      currency: String(r.currency || '').trim().toUpperCase(),\n      name: r.account_name || '',\n    };\n  }\n  return map;\n}\n\n// Account-level country wins; accounts marked MULTI fall back to the campaign name.\nfunction resolveCountry(accountMap, platform, accountId, campaignName) {\n  const acc = accountMap[`${platform}|${normId(accountId)}`];\n  if (acc && COUNTRIES.includes(acc.country)) return acc.country;\n  return countryFromName(campaignName);\n}\n\n// fx = Frankfurter time series response {rates: {'YYYY-MM-DD': {CZK: 24.3, ...}}}, base EUR.\n// Returns units of `currency` per 1 EUR, using the latest rate on or before `date`.\nfunction fxRate(fx, currency, date) {\n  const cur = String(currency || 'EUR').toUpperCase();\n  if (cur === 'EUR') return 1;\n  if (cur === 'BGN') return 1.95583; // fixed conversion rate, BG uses EUR since 2026-01-01\n  const rates = (fx && fx.rates) || {};\n  const dates = Object.keys(rates).sort();\n  let rate = null;\n  for (const d of dates) if (d <= date && rates[d][cur]) rate = rates[d][cur];\n  if (rate === null) for (const d of dates) if (rates[d][cur]) { rate = rates[d][cur]; break; }\n  if (!rate) throw new Error(`Chýba kurz ECB pre ${cur} k ${date}`);\n  return rate;\n}\n\n// n8n HTTP node may emit one item per array element or one item wrapping the array.\nfunction unwrap(items, key) {\n  const out = [];\n  for (const { json } of items) {\n    const parts = Array.isArray(json) ? json : [json];\n    for (const p of parts) {\n      if (p && Array.isArray(p[key])) out.push(...p[key]);\n    }\n  }\n  return out;\n}\n\n// Rule -> Asana task type (used when a task is built from a finding without AI).\nconst RULE_TYPE = {\n  TRACKING_OUTAGE: 'TRACKING', NO_DATA: 'DATA_QUALITY', UNMAPPED: 'DATA_QUALITY',\n  PACING_OVER: 'BUDGET', PACING_UNDER: 'BUDGET',\n  KPI_BELOW_TARGET: 'PERFORMANCE', KPI_WOW_DROP: 'PERFORMANCE', CAMPAIGN_DROP: 'PERFORMANCE',\n  WASTE_NO_CONV: 'WASTE', SCALE_BUDGET: 'SCALE', CREATIVE_FATIGUE: 'CREATIVE',\n  SEARCH_TERMS: 'SEARCH_TERMS', POLICY: 'POLICY', LEARNING_LIMITED: 'LEARNING',\n};\nconst PRIORITY_ORDER = { P1: 0, P2: 1, P3: 2 };\n\n// BigQuery nodes run with \"Always Output Data\", so an empty result is one empty item.\nconst rows = (items) => items.map((i) => i.json).filter((j) => j && Object.keys(j).length > 0);\n\n// Alert-ID custom field text -> Set of alert keys.\nconst parseKeys = (text) => new Set(String(text || '').split(/[\\s,;]+/).map((s) => s.trim()).filter(Boolean));\n\n// Open tasks of the Asana project (paginated HTTP output) -> [{gid, name, url, keys:Set, priority}]\nfunction openTasks(items, alertFieldGid, priorityFieldGid) {\n  return unwrap(items, 'data').map((t) => {\n    const cf = (gid) => (t.custom_fields || []).find((c) => c.gid === gid);\n    const alert = cf(alertFieldGid);\n    const prio = priorityFieldGid ? cf(priorityFieldGid) : null;\n    return {\n      gid: t.gid,\n      name: t.name,\n      url: t.permalink_url,\n      keys: parseKeys(alert && (alert.text_value ?? alert.display_value)),\n      priority: prio ? ((prio.enum_value && prio.enum_value.name) || prio.display_value || '') : '',\n    };\n  });\n}\n\n// A finding turned into a task without AI (fallback, or update of an already-open task).\nfunction taskFromFinding(f, source) {\n  return {\n    alert_keys: [f.alert_key],\n    title: f.title.slice(0, 120),\n    country: f.country,\n    platform: f.platform,\n    type: RULE_TYPE[f.rule] || 'PERFORMANCE',\n    priority: f.severity,\n    diagnosis: f.summary_line,\n    action_steps: f.suggested_steps || [],\n    expected_impact: '',\n    expected_impact_eur: 0,\n    campaign_id: f.campaign_id || '',\n    source,\n    findings: [f],\n  };\n}\n\n// ---- wf1_norm_gads_issues.js ----\n// Google Ads disapproved (enabled) ads -> entity_issues rows.\nconst cfg = $('Config').first().json;\nconst accountMap = buildAccountMap($('Accounts').all());\nconst ingested = new Date().toISOString();\nconst out = [];\n\nfor (const r of unwrap($input.all(), 'results')) {\n  const ad = (r.adGroupAd && r.adGroupAd.ad) || {};\n  out.push({\n    json: {\n      snapshot_date: cfg.until,\n      platform: 'GOOGLE_ADS',\n      account_id: normId(r.customer.id),\n      country: resolveCountry(accountMap, 'GOOGLE_ADS', r.customer.id, r.campaign.name),\n      entity_level: 'AD',\n      entity_id: String(ad.id),\n      entity_name: ad.name || `Reklama ${ad.id} (${r.adGroup.name})`,\n      campaign_id: String(r.campaign.id),\n      campaign_name: r.campaign.name || '',\n      issue: 'DISAPPROVED',\n      detail: `Ad group: ${r.adGroup.name}`,\n      ingested_at: ingested,\n    },\n  });\n}\nreturn out;\n"
+      },
+      "id": "2e080bc7-594a-5f6d-b84c-e8dcc5ab674f",
+      "name": "Normalize GAds Issues",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "insert",
+        "projectId": {
+          "__rl": true,
+          "value": "YOUR_GCP_PROJECT",
+          "mode": "id"
+        },
+        "datasetId": {
+          "__rl": true,
+          "value": "balabim_ads",
+          "mode": "id"
+        },
+        "tableId": {
+          "__rl": true,
+          "value": "entity_issues",
+          "mode": "id"
+        },
+        "dataMode": "autoMap",
+        "options": {}
+      },
+      "id": "f24ccf28-f9fb-554b-b31c-6892a89372ce",
+      "name": "BQ entity_issues (Google)",
+      "type": "n8n-nodes-base.googleBigQuery",
+      "typeVersion": 2.1,
+      "position": [
+        1960,
+        400
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "REPLACE_ME",
+          "name": "Google Service Account (BigQuery + Sheets)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shared helpers. build.py prepends this file to every Code node, so keep it\n// free of top-level side effects and never redeclare these names in node code.\nconst COUNTRIES = ['SK', 'CZ', 'HU', 'PL', 'RO', 'BG', 'HR', 'SI', 'GR'];\nconst PLATFORM_LABEL = { GOOGLE_ADS: 'Google Ads', META: 'Meta Ads', BOTH: 'Google + Meta' };\n\n// Accepts numbers, API strings (\"123.45\") and sheet values (\"3,5\", \"1 200 €\").\nfunction num(v) {\n  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;\n  if (v === null || v === undefined || v === '') return 0;\n  const n = Number(String(v).replace(/[\\s€%]/g, '').replace(',', '.'));\n  return Number.isFinite(n) ? n : 0;\n}\nconst round = (v, d = 2) => Math.round(num(v) * 10 ** d) / 10 ** d;\nconst safeDiv = (a, b) => (num(b) === 0 ? null : num(a) / num(b));\nconst pct = (v) => (v === null || v === undefined ? 'n/a' : `${round(v * 100, 1)} %`);\nconst eur = (v) => `${round(v, 0).toLocaleString('sk-SK')} €`;\nconst fmt = (v, d = 2) => (v === null || v === undefined ? 'n/a' : String(round(v, d)));\nconst normId = (id) => String(id ?? '').replace(/^act_/, '').replace(/-/g, '').trim();\nconst isActive = (v) => !['FALSE', 'NIE', '0', 'NO'].includes(String(v ?? 'TRUE').trim().toUpperCase());\n\n// Country from campaign name: SK_Search_Brand, \"PMax | HU | Feed\", \"Meta-RO-Prospecting\"...\nfunction countryFromName(name) {\n  const m = String(name || '').toUpperCase().match(/(?:^|[^A-Z])(SK|CZ|HU|PL|RO|BG|HR|SI|GR)(?=[^A-Z]|$)/);\n  return m ? m[1] : 'UNKNOWN';\n}\n\n// Rows of the \"accounts\" sheet -> { 'GOOGLE_ADS|1234567890': {country, currency, name} }\nfunction buildAccountMap(items) {\n  const map = {};\n  for (const { json: r } of items) {\n    if (!isActive(r.active)) continue;\n    const platform = String(r.platform || '').trim().toUpperCase();\n    map[`${platform}|${normId(r.account_id)}`] = {\n      country: String(r.country || '').trim().toUpperCase(),\n      currency: String(r.currency || '').trim().toUpperCase(),\n      name: r.account_name || '',\n    };\n  }\n  return map;\n}\n\n// Account-level country wins; accounts marked MULTI fall back to the campaign name.\nfunction resolveCountry(accountMap, platform, accountId, campaignName) {\n  const acc = accountMap[`${platform}|${normId(accountId)}`];\n  if (acc && COUNTRIES.includes(acc.country)) return acc.country;\n  return countryFromName(campaignName);\n}\n\n// fx = Frankfurter time series response {rates: {'YYYY-MM-DD': {CZK: 24.3, ...}}}, base EUR.\n// Returns units of `currency` per 1 EUR, using the latest rate on or before `date`.\nfunction fxRate(fx, currency, date) {\n  const cur = String(currency || 'EUR').toUpperCase();\n  if (cur === 'EUR') return 1;\n  if (cur === 'BGN') return 1.95583; // fixed conversion rate, BG uses EUR since 2026-01-01\n  const rates = (fx && fx.rates) || {};\n  const dates = Object.keys(rates).sort();\n  let rate = null;\n  for (const d of dates) if (d <= date && rates[d][cur]) rate = rates[d][cur];\n  if (rate === null) for (const d of dates) if (rates[d][cur]) { rate = rates[d][cur]; break; }\n  if (!rate) throw new Error(`Chýba kurz ECB pre ${cur} k ${date}`);\n  return rate;\n}\n\n// n8n HTTP node may emit one item per array element or one item wrapping the array.\nfunction unwrap(items, key) {\n  const out = [];\n  for (const { json } of items) {\n    const parts = Array.isArray(json) ? json : [json];\n    for (const p of parts) {\n      if (p && Array.isArray(p[key])) out.push(...p[key]);\n    }\n  }\n  return out;\n}\n\n// Rule -> Asana task type (used when a task is built from a finding without AI).\nconst RULE_TYPE = {\n  TRACKING_OUTAGE: 'TRACKING', NO_DATA: 'DATA_QUALITY', UNMAPPED: 'DATA_QUALITY',\n  PACING_OVER: 'BUDGET', PACING_UNDER: 'BUDGET',\n  KPI_BELOW_TARGET: 'PERFORMANCE', KPI_WOW_DROP: 'PERFORMANCE', CAMPAIGN_DROP: 'PERFORMANCE',\n  WASTE_NO_CONV: 'WASTE', SCALE_BUDGET: 'SCALE', CREATIVE_FATIGUE: 'CREATIVE',\n  SEARCH_TERMS: 'SEARCH_TERMS', POLICY: 'POLICY', LEARNING_LIMITED: 'LEARNING',\n};\nconst PRIORITY_ORDER = { P1: 0, P2: 1, P3: 2 };\n\n// BigQuery nodes run with \"Always Output Data\", so an empty result is one empty item.\nconst rows = (items) => items.map((i) => i.json).filter((j) => j && Object.keys(j).length > 0);\n\n// Alert-ID custom field text -> Set of alert keys.\nconst parseKeys = (text) => new Set(String(text || '').split(/[\\s,;]+/).map((s) => s.trim()).filter(Boolean));\n\n// Open tasks of the Asana project (paginated HTTP output) -> [{gid, name, url, keys:Set, priority}]\nfunction openTasks(items, alertFieldGid, priorityFieldGid) {\n  return unwrap(items, 'data').map((t) => {\n    const cf = (gid) => (t.custom_fields || []).find((c) => c.gid === gid);\n    const alert = cf(alertFieldGid);\n    const prio = priorityFieldGid ? cf(priorityFieldGid) : null;\n    return {\n      gid: t.gid,\n      name: t.name,\n      url: t.permalink_url,\n      keys: parseKeys(alert && (alert.text_value ?? alert.display_value)),\n      priority: prio ? ((prio.enum_value && prio.enum_value.name) || prio.display_value || '') : '',\n    };\n  });\n}\n\n// A finding turned into a task without AI (fallback, or update of an already-open task).\nfunction taskFromFinding(f, source) {\n  return {\n    alert_keys: [f.alert_key],\n    title: f.title.slice(0, 120),\n    country: f.country,\n    platform: f.platform,\n    type: RULE_TYPE[f.rule] || 'PERFORMANCE',\n    priority: f.severity,\n    diagnosis: f.summary_line,\n    action_steps: f.suggested_steps || [],\n    expected_impact: '',\n    expected_impact_eur: 0,\n    campaign_id: f.campaign_id || '',\n    source,\n    findings: [f],\n  };\n}\n\n// ---- wf1_filter_meta.js ----\nreturn $input.all().filter((i) =>\n  String(i.json.platform || '').trim().toUpperCase() === 'META' && isActive(i.json.active) && i.json.account_id);\n"
+      },
+      "id": "a7c35867-9035-5c74-bc2e-281162839800",
+      "name": "Meta Accounts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        800
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://graph.facebook.com/{{ $('Config').first().json.meta_api_version }}/act_{{ String($json.account_id).replace(/^act_/, '') }}/insights",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "level",
+              "value": "adset"
+            },
+            {
+              "name": "time_increment",
+              "value": "1"
+            },
+            {
+              "name": "time_range",
+              "value": "={{ $('Config').first().json.meta_time_range }}"
+            },
+            {
+              "name": "fields",
+              "value": "account_id,account_name,account_currency,campaign_id,campaign_name,adset_id,adset_name,objective,spend,impressions,reach,inline_link_clicks,actions,action_values"
+            },
+            {
+              "name": "limit",
+              "value": "500"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 120000,
+          "pagination": {
+            "pagination": {
+              "paginationMode": "responseContainsNextURL",
+              "nextURL": "={{ $response.body.paging.next }}",
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body.paging || !$response.body.paging.next }}",
+              "limitPagesFetched": true,
+              "maxRequests": 50
+            }
+          }
+        }
+      },
+      "id": "fe0f33d4-62cc-5ed0-a7d7-c2dd4a3ab990",
+      "name": "Meta Insights Daily",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1400,
+        600
+      ],
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "REPLACE_ME",
+          "name": "Meta System User token"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shared helpers. build.py prepends this file to every Code node, so keep it\n// free of top-level side effects and never redeclare these names in node code.\nconst COUNTRIES = ['SK', 'CZ', 'HU', 'PL', 'RO', 'BG', 'HR', 'SI', 'GR'];\nconst PLATFORM_LABEL = { GOOGLE_ADS: 'Google Ads', META: 'Meta Ads', BOTH: 'Google + Meta' };\n\n// Accepts numbers, API strings (\"123.45\") and sheet values (\"3,5\", \"1 200 €\").\nfunction num(v) {\n  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;\n  if (v === null || v === undefined || v === '') return 0;\n  const n = Number(String(v).replace(/[\\s€%]/g, '').replace(',', '.'));\n  return Number.isFinite(n) ? n : 0;\n}\nconst round = (v, d = 2) => Math.round(num(v) * 10 ** d) / 10 ** d;\nconst safeDiv = (a, b) => (num(b) === 0 ? null : num(a) / num(b));\nconst pct = (v) => (v === null || v === undefined ? 'n/a' : `${round(v * 100, 1)} %`);\nconst eur = (v) => `${round(v, 0).toLocaleString('sk-SK')} €`;\nconst fmt = (v, d = 2) => (v === null || v === undefined ? 'n/a' : String(round(v, d)));\nconst normId = (id) => String(id ?? '').replace(/^act_/, '').replace(/-/g, '').trim();\nconst isActive = (v) => !['FALSE', 'NIE', '0', 'NO'].includes(String(v ?? 'TRUE').trim().toUpperCase());\n\n// Country from campaign name: SK_Search_Brand, \"PMax | HU | Feed\", \"Meta-RO-Prospecting\"...\nfunction countryFromName(name) {\n  const m = String(name || '').toUpperCase().match(/(?:^|[^A-Z])(SK|CZ|HU|PL|RO|BG|HR|SI|GR)(?=[^A-Z]|$)/);\n  return m ? m[1] : 'UNKNOWN';\n}\n\n// Rows of the \"accounts\" sheet -> { 'GOOGLE_ADS|1234567890': {country, currency, name} }\nfunction buildAccountMap(items) {\n  const map = {};\n  for (const { json: r } of items) {\n    if (!isActive(r.active)) continue;\n    const platform = String(r.platform || '').trim().toUpperCase();\n    map[`${platform}|${normId(r.account_id)}`] = {\n      country: String(r.country || '').trim().toUpperCase(),\n      currency: String(r.currency || '').trim().toUpperCase(),\n      name: r.account_name || '',\n    };\n  }\n  return map;\n}\n\n// Account-level country wins; accounts marked MULTI fall back to the campaign name.\nfunction resolveCountry(accountMap, platform, accountId, campaignName) {\n  const acc = accountMap[`${platform}|${normId(accountId)}`];\n  if (acc && COUNTRIES.includes(acc.country)) return acc.country;\n  return countryFromName(campaignName);\n}\n\n// fx = Frankfurter time series response {rates: {'YYYY-MM-DD': {CZK: 24.3, ...}}}, base EUR.\n// Returns units of `currency` per 1 EUR, using the latest rate on or before `date`.\nfunction fxRate(fx, currency, date) {\n  const cur = String(currency || 'EUR').toUpperCase();\n  if (cur === 'EUR') return 1;\n  if (cur === 'BGN') return 1.95583; // fixed conversion rate, BG uses EUR since 2026-01-01\n  const rates = (fx && fx.rates) || {};\n  const dates = Object.keys(rates).sort();\n  let rate = null;\n  for (const d of dates) if (d <= date && rates[d][cur]) rate = rates[d][cur];\n  if (rate === null) for (const d of dates) if (rates[d][cur]) { rate = rates[d][cur]; break; }\n  if (!rate) throw new Error(`Chýba kurz ECB pre ${cur} k ${date}`);\n  return rate;\n}\n\n// n8n HTTP node may emit one item per array element or one item wrapping the array.\nfunction unwrap(items, key) {\n  const out = [];\n  for (const { json } of items) {\n    const parts = Array.isArray(json) ? json : [json];\n    for (const p of parts) {\n      if (p && Array.isArray(p[key])) out.push(...p[key]);\n    }\n  }\n  return out;\n}\n\n// Rule -> Asana task type (used when a task is built from a finding without AI).\nconst RULE_TYPE = {\n  TRACKING_OUTAGE: 'TRACKING', NO_DATA: 'DATA_QUALITY', UNMAPPED: 'DATA_QUALITY',\n  PACING_OVER: 'BUDGET', PACING_UNDER: 'BUDGET',\n  KPI_BELOW_TARGET: 'PERFORMANCE', KPI_WOW_DROP: 'PERFORMANCE', CAMPAIGN_DROP: 'PERFORMANCE',\n  WASTE_NO_CONV: 'WASTE', SCALE_BUDGET: 'SCALE', CREATIVE_FATIGUE: 'CREATIVE',\n  SEARCH_TERMS: 'SEARCH_TERMS', POLICY: 'POLICY', LEARNING_LIMITED: 'LEARNING',\n};\nconst PRIORITY_ORDER = { P1: 0, P2: 1, P3: 2 };\n\n// BigQuery nodes run with \"Always Output Data\", so an empty result is one empty item.\nconst rows = (items) => items.map((i) => i.json).filter((j) => j && Object.keys(j).length > 0);\n\n// Alert-ID custom field text -> Set of alert keys.\nconst parseKeys = (text) => new Set(String(text || '').split(/[\\s,;]+/).map((s) => s.trim()).filter(Boolean));\n\n// Open tasks of the Asana project (paginated HTTP output) -> [{gid, name, url, keys:Set, priority}]\nfunction openTasks(items, alertFieldGid, priorityFieldGid) {\n  return unwrap(items, 'data').map((t) => {\n    const cf = (gid) => (t.custom_fields || []).find((c) => c.gid === gid);\n    const alert = cf(alertFieldGid);\n    const prio = priorityFieldGid ? cf(priorityFieldGid) : null;\n    return {\n      gid: t.gid,\n      name: t.name,\n      url: t.permalink_url,\n      keys: parseKeys(alert && (alert.text_value ?? alert.display_value)),\n      priority: prio ? ((prio.enum_value && prio.enum_value.name) || prio.display_value || '') : '',\n    };\n  });\n}\n\n// A finding turned into a task without AI (fallback, or update of an already-open task).\nfunction taskFromFinding(f, source) {\n  return {\n    alert_keys: [f.alert_key],\n    title: f.title.slice(0, 120),\n    country: f.country,\n    platform: f.platform,\n    type: RULE_TYPE[f.rule] || 'PERFORMANCE',\n    priority: f.severity,\n    diagnosis: f.summary_line,\n    action_steps: f.suggested_steps || [],\n    expected_impact: '',\n    expected_impact_eur: 0,\n    campaign_id: f.campaign_id || '',\n    source,\n    findings: [f],\n  };\n}\n\n// ---- wf1_norm_meta_perf.js ----\n// Meta insights (ad set × day) -> daily_perf rows in EUR.\nconst cfg = $('Config').first().json;\nconst fx = $('FX').first().json;\nconst accountMap = buildAccountMap($('Accounts').all());\nconst ingested = new Date().toISOString();\nconst types = cfg.meta_purchase_action_types;\n\n// First matching action type wins, so omni_purchase is not double-counted with purchase.\nfunction pick(list) {\n  for (const t of types) {\n    const hit = (list || []).find((a) => a.action_type === t);\n    if (hit) return num(hit.value);\n  }\n  return 0;\n}\n\nconst out = [];\nfor (const r of unwrap($input.all(), 'data')) {\n  const date = r.date_start;\n  const currency = r.account_currency || (accountMap[`META|${normId(r.account_id)}`] || {}).currency || 'EUR';\n  const rate = fxRate(fx, currency, date);\n  out.push({\n    json: {\n      date,\n      platform: 'META',\n      account_id: normId(r.account_id),\n      account_name: r.account_name || '',\n      country: resolveCountry(accountMap, 'META', r.account_id, r.campaign_name),\n      campaign_id: String(r.campaign_id),\n      campaign_name: r.campaign_name || '',\n      campaign_type: r.objective || '',\n      campaign_status: '',\n      adset_id: String(r.adset_id),\n      adset_name: r.adset_name || '',\n      currency,\n      fx_rate: rate,\n      cost_eur: round(num(r.spend) / rate, 4),\n      impressions: Math.round(num(r.impressions)),\n      clicks: Math.round(num(r.inline_link_clicks)),\n      reach: Math.round(num(r.reach)),\n      conversions: round(pick(r.actions), 4),\n      conv_value_eur: round(pick(r.action_values) / rate, 4),\n      search_is: null,\n      search_lost_is_budget: null,\n      search_lost_is_rank: null,\n      budget_daily_eur: null,\n      bidding_strategy: '',\n      primary_status: '',\n      primary_status_reasons: '',\n      ingested_at: ingested,\n    },\n  });\n}\nreturn out;\n"
+      },
+      "id": "c9337629-e5b4-5bf0-90d3-b2e53835ad55",
+      "name": "Normalize Meta Perf",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "insert",
+        "projectId": {
+          "__rl": true,
+          "value": "YOUR_GCP_PROJECT",
+          "mode": "id"
+        },
+        "datasetId": {
+          "__rl": true,
+          "value": "balabim_ads",
+          "mode": "id"
+        },
+        "tableId": {
+          "__rl": true,
+          "value": "daily_perf",
+          "mode": "id"
+        },
+        "dataMode": "autoMap",
+        "options": {}
+      },
+      "id": "5820b654-9a70-57a3-ab88-dc6d33241f37",
+      "name": "BQ daily_perf (Meta)",
+      "type": "n8n-nodes-base.googleBigQuery",
+      "typeVersion": 2.1,
+      "position": [
+        1960,
+        600
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "REPLACE_ME",
+          "name": "Google Service Account (BigQuery + Sheets)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://graph.facebook.com/{{ $('Config').first().json.meta_api_version }}/act_{{ String($json.account_id).replace(/^act_/, '') }}/insights",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "level",
+              "value": "adset"
+            },
+            {
+              "name": "time_range",
+              "value": "={{ $('Config').first().json.meta_time_range }}"
+            },
+            {
+              "name": "fields",
+              "value": "account_id,account_currency,campaign_id,campaign_name,adset_id,adset_name,spend,impressions,reach,frequency,inline_link_clicks"
+            },
+            {
+              "name": "limit",
+              "value": "500"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 120000,
+          "pagination": {
+            "pagination": {
+              "paginationMode": "responseContainsNextURL",
+              "nextURL": "={{ $response.body.paging.next }}",
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body.paging || !$response.body.paging.next }}",
+              "limitPagesFetched": true,
+              "maxRequests": 50
+            }
+          }
+        }
+      },
+      "id": "77ec09aa-3966-5c09-bf84-9baa545657ed",
+      "name": "Meta Insights 7d",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1400,
+        800
+      ],
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "REPLACE_ME",
+          "name": "Meta System User token"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shared helpers. build.py prepends this file to every Code node, so keep it\n// free of top-level side effects and never redeclare these names in node code.\nconst COUNTRIES = ['SK', 'CZ', 'HU', 'PL', 'RO', 'BG', 'HR', 'SI', 'GR'];\nconst PLATFORM_LABEL = { GOOGLE_ADS: 'Google Ads', META: 'Meta Ads', BOTH: 'Google + Meta' };\n\n// Accepts numbers, API strings (\"123.45\") and sheet values (\"3,5\", \"1 200 €\").\nfunction num(v) {\n  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;\n  if (v === null || v === undefined || v === '') return 0;\n  const n = Number(String(v).replace(/[\\s€%]/g, '').replace(',', '.'));\n  return Number.isFinite(n) ? n : 0;\n}\nconst round = (v, d = 2) => Math.round(num(v) * 10 ** d) / 10 ** d;\nconst safeDiv = (a, b) => (num(b) === 0 ? null : num(a) / num(b));\nconst pct = (v) => (v === null || v === undefined ? 'n/a' : `${round(v * 100, 1)} %`);\nconst eur = (v) => `${round(v, 0).toLocaleString('sk-SK')} €`;\nconst fmt = (v, d = 2) => (v === null || v === undefined ? 'n/a' : String(round(v, d)));\nconst normId = (id) => String(id ?? '').replace(/^act_/, '').replace(/-/g, '').trim();\nconst isActive = (v) => !['FALSE', 'NIE', '0', 'NO'].includes(String(v ?? 'TRUE').trim().toUpperCase());\n\n// Country from campaign name: SK_Search_Brand, \"PMax | HU | Feed\", \"Meta-RO-Prospecting\"...\nfunction countryFromName(name) {\n  const m = String(name || '').toUpperCase().match(/(?:^|[^A-Z])(SK|CZ|HU|PL|RO|BG|HR|SI|GR)(?=[^A-Z]|$)/);\n  return m ? m[1] : 'UNKNOWN';\n}\n\n// Rows of the \"accounts\" sheet -> { 'GOOGLE_ADS|1234567890': {country, currency, name} }\nfunction buildAccountMap(items) {\n  const map = {};\n  for (const { json: r } of items) {\n    if (!isActive(r.active)) continue;\n    const platform = String(r.platform || '').trim().toUpperCase();\n    map[`${platform}|${normId(r.account_id)}`] = {\n      country: String(r.country || '').trim().toUpperCase(),\n      currency: String(r.currency || '').trim().toUpperCase(),\n      name: r.account_name || '',\n    };\n  }\n  return map;\n}\n\n// Account-level country wins; accounts marked MULTI fall back to the campaign name.\nfunction resolveCountry(accountMap, platform, accountId, campaignName) {\n  const acc = accountMap[`${platform}|${normId(accountId)}`];\n  if (acc && COUNTRIES.includes(acc.country)) return acc.country;\n  return countryFromName(campaignName);\n}\n\n// fx = Frankfurter time series response {rates: {'YYYY-MM-DD': {CZK: 24.3, ...}}}, base EUR.\n// Returns units of `currency` per 1 EUR, using the latest rate on or before `date`.\nfunction fxRate(fx, currency, date) {\n  const cur = String(currency || 'EUR').toUpperCase();\n  if (cur === 'EUR') return 1;\n  if (cur === 'BGN') return 1.95583; // fixed conversion rate, BG uses EUR since 2026-01-01\n  const rates = (fx && fx.rates) || {};\n  const dates = Object.keys(rates).sort();\n  let rate = null;\n  for (const d of dates) if (d <= date && rates[d][cur]) rate = rates[d][cur];\n  if (rate === null) for (const d of dates) if (rates[d][cur]) { rate = rates[d][cur]; break; }\n  if (!rate) throw new Error(`Chýba kurz ECB pre ${cur} k ${date}`);\n  return rate;\n}\n\n// n8n HTTP node may emit one item per array element or one item wrapping the array.\nfunction unwrap(items, key) {\n  const out = [];\n  for (const { json } of items) {\n    const parts = Array.isArray(json) ? json : [json];\n    for (const p of parts) {\n      if (p && Array.isArray(p[key])) out.push(...p[key]);\n    }\n  }\n  return out;\n}\n\n// Rule -> Asana task type (used when a task is built from a finding without AI).\nconst RULE_TYPE = {\n  TRACKING_OUTAGE: 'TRACKING', NO_DATA: 'DATA_QUALITY', UNMAPPED: 'DATA_QUALITY',\n  PACING_OVER: 'BUDGET', PACING_UNDER: 'BUDGET',\n  KPI_BELOW_TARGET: 'PERFORMANCE', KPI_WOW_DROP: 'PERFORMANCE', CAMPAIGN_DROP: 'PERFORMANCE',\n  WASTE_NO_CONV: 'WASTE', SCALE_BUDGET: 'SCALE', CREATIVE_FATIGUE: 'CREATIVE',\n  SEARCH_TERMS: 'SEARCH_TERMS', POLICY: 'POLICY', LEARNING_LIMITED: 'LEARNING',\n};\nconst PRIORITY_ORDER = { P1: 0, P2: 1, P3: 2 };\n\n// BigQuery nodes run with \"Always Output Data\", so an empty result is one empty item.\nconst rows = (items) => items.map((i) => i.json).filter((j) => j && Object.keys(j).length > 0);\n\n// Alert-ID custom field text -> Set of alert keys.\nconst parseKeys = (text) => new Set(String(text || '').split(/[\\s,;]+/).map((s) => s.trim()).filter(Boolean));\n\n// Open tasks of the Asana project (paginated HTTP output) -> [{gid, name, url, keys:Set, priority}]\nfunction openTasks(items, alertFieldGid, priorityFieldGid) {\n  return unwrap(items, 'data').map((t) => {\n    const cf = (gid) => (t.custom_fields || []).find((c) => c.gid === gid);\n    const alert = cf(alertFieldGid);\n    const prio = priorityFieldGid ? cf(priorityFieldGid) : null;\n    return {\n      gid: t.gid,\n      name: t.name,\n      url: t.permalink_url,\n      keys: parseKeys(alert && (alert.text_value ?? alert.display_value)),\n      priority: prio ? ((prio.enum_value && prio.enum_value.name) || prio.display_value || '') : '',\n    };\n  });\n}\n\n// A finding turned into a task without AI (fallback, or update of an already-open task).\nfunction taskFromFinding(f, source) {\n  return {\n    alert_keys: [f.alert_key],\n    title: f.title.slice(0, 120),\n    country: f.country,\n    platform: f.platform,\n    type: RULE_TYPE[f.rule] || 'PERFORMANCE',\n    priority: f.severity,\n    diagnosis: f.summary_line,\n    action_steps: f.suggested_steps || [],\n    expected_impact: '',\n    expected_impact_eur: 0,\n    campaign_id: f.campaign_id || '',\n    source,\n    findings: [f],\n  };\n}\n\n// ---- wf1_norm_meta_freq.js ----\n// Meta insights (ad set, whole 7-day window) -> meta_adset_7d rows.\n// Frequency is not additive across days, so it needs its own non-daily request.\nconst cfg = $('Config').first().json;\nconst fx = $('FX').first().json;\nconst accountMap = buildAccountMap($('Accounts').all());\nconst ingested = new Date().toISOString();\nconst out = [];\n\nfor (const r of unwrap($input.all(), 'data')) {\n  const currency = r.account_currency || 'EUR';\n  const rate = fxRate(fx, currency, cfg.until);\n  out.push({\n    json: {\n      snapshot_date: cfg.until,\n      account_id: normId(r.account_id),\n      country: resolveCountry(accountMap, 'META', r.account_id, r.campaign_name),\n      campaign_id: String(r.campaign_id),\n      campaign_name: r.campaign_name || '',\n      adset_id: String(r.adset_id),\n      adset_name: r.adset_name || '',\n      spend_eur: round(num(r.spend) / rate, 4),\n      impressions: Math.round(num(r.impressions)),\n      reach: Math.round(num(r.reach)),\n      frequency: round(num(r.frequency), 3),\n      link_clicks: Math.round(num(r.inline_link_clicks)),\n      ingested_at: ingested,\n    },\n  });\n}\nreturn out;\n"
+      },
+      "id": "24feb0a1-2b9f-55d8-8132-8a14e5daa61e",
+      "name": "Normalize Meta Frequency",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        800
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "insert",
+        "projectId": {
+          "__rl": true,
+          "value": "YOUR_GCP_PROJECT",
+          "mode": "id"
+        },
+        "datasetId": {
+          "__rl": true,
+          "value": "balabim_ads",
+          "mode": "id"
+        },
+        "tableId": {
+          "__rl": true,
+          "value": "meta_adset_7d",
+          "mode": "id"
+        },
+        "dataMode": "autoMap",
+        "options": {}
+      },
+      "id": "2f890978-8779-51ca-abf9-e5abbcbdc273",
+      "name": "BQ meta_adset_7d",
+      "type": "n8n-nodes-base.googleBigQuery",
+      "typeVersion": 2.1,
+      "position": [
+        1960,
+        800
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "REPLACE_ME",
+          "name": "Google Service Account (BigQuery + Sheets)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://graph.facebook.com/{{ $('Config').first().json.meta_api_version }}/act_{{ String($json.account_id).replace(/^act_/, '') }}/adsets",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "fields",
+              "value": "id,name,account_id,campaign_id,campaign{name},effective_status,learning_stage_info"
+            },
+            {
+              "name": "effective_status",
+              "value": "[\"ACTIVE\"]"
+            },
+            {
+              "name": "limit",
+              "value": "500"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000,
+          "pagination": {
+            "pagination": {
+              "paginationMode": "responseContainsNextURL",
+              "nextURL": "={{ $response.body.paging.next }}",
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body.paging || !$response.body.paging.next }}",
+              "limitPagesFetched": true,
+              "maxRequests": 50
+            }
+          }
+        }
+      },
+      "id": "533d0909-cde2-56f8-b00a-b926c16c5cac",
+      "name": "Meta Ad Sets",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1400,
+        1000
+      ],
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "REPLACE_ME",
+          "name": "Meta System User token"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://graph.facebook.com/{{ $('Config').first().json.meta_api_version }}/act_{{ String($json.account_id).replace(/^act_/, '') }}/ads",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "fields",
+              "value": "id,name,account_id,adset_id,campaign_id,campaign{name},effective_status,issues_info"
+            },
+            {
+              "name": "effective_status",
+              "value": "[\"DISAPPROVED\",\"WITH_ISSUES\"]"
+            },
+            {
+              "name": "limit",
+              "value": "500"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000,
+          "pagination": {
+            "pagination": {
+              "paginationMode": "responseContainsNextURL",
+              "nextURL": "={{ $response.body.paging.next }}",
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body.paging || !$response.body.paging.next }}",
+              "limitPagesFetched": true,
+              "maxRequests": 50
+            }
+          }
+        }
+      },
+      "id": "5682a971-231a-5f4c-86c8-8f5902072379",
+      "name": "Meta Ads With Issues",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1400,
+        1200
+      ],
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "REPLACE_ME",
+          "name": "Meta System User token"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shared helpers. build.py prepends this file to every Code node, so keep it\n// free of top-level side effects and never redeclare these names in node code.\nconst COUNTRIES = ['SK', 'CZ', 'HU', 'PL', 'RO', 'BG', 'HR', 'SI', 'GR'];\nconst PLATFORM_LABEL = { GOOGLE_ADS: 'Google Ads', META: 'Meta Ads', BOTH: 'Google + Meta' };\n\n// Accepts numbers, API strings (\"123.45\") and sheet values (\"3,5\", \"1 200 €\").\nfunction num(v) {\n  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;\n  if (v === null || v === undefined || v === '') return 0;\n  const n = Number(String(v).replace(/[\\s€%]/g, '').replace(',', '.'));\n  return Number.isFinite(n) ? n : 0;\n}\nconst round = (v, d = 2) => Math.round(num(v) * 10 ** d) / 10 ** d;\nconst safeDiv = (a, b) => (num(b) === 0 ? null : num(a) / num(b));\nconst pct = (v) => (v === null || v === undefined ? 'n/a' : `${round(v * 100, 1)} %`);\nconst eur = (v) => `${round(v, 0).toLocaleString('sk-SK')} €`;\nconst fmt = (v, d = 2) => (v === null || v === undefined ? 'n/a' : String(round(v, d)));\nconst normId = (id) => String(id ?? '').replace(/^act_/, '').replace(/-/g, '').trim();\nconst isActive = (v) => !['FALSE', 'NIE', '0', 'NO'].includes(String(v ?? 'TRUE').trim().toUpperCase());\n\n// Country from campaign name: SK_Search_Brand, \"PMax | HU | Feed\", \"Meta-RO-Prospecting\"...\nfunction countryFromName(name) {\n  const m = String(name || '').toUpperCase().match(/(?:^|[^A-Z])(SK|CZ|HU|PL|RO|BG|HR|SI|GR)(?=[^A-Z]|$)/);\n  return m ? m[1] : 'UNKNOWN';\n}\n\n// Rows of the \"accounts\" sheet -> { 'GOOGLE_ADS|1234567890': {country, currency, name} }\nfunction buildAccountMap(items) {\n  const map = {};\n  for (const { json: r } of items) {\n    if (!isActive(r.active)) continue;\n    const platform = String(r.platform || '').trim().toUpperCase();\n    map[`${platform}|${normId(r.account_id)}`] = {\n      country: String(r.country || '').trim().toUpperCase(),\n      currency: String(r.currency || '').trim().toUpperCase(),\n      name: r.account_name || '',\n    };\n  }\n  return map;\n}\n\n// Account-level country wins; accounts marked MULTI fall back to the campaign name.\nfunction resolveCountry(accountMap, platform, accountId, campaignName) {\n  const acc = accountMap[`${platform}|${normId(accountId)}`];\n  if (acc && COUNTRIES.includes(acc.country)) return acc.country;\n  return countryFromName(campaignName);\n}\n\n// fx = Frankfurter time series response {rates: {'YYYY-MM-DD': {CZK: 24.3, ...}}}, base EUR.\n// Returns units of `currency` per 1 EUR, using the latest rate on or before `date`.\nfunction fxRate(fx, currency, date) {\n  const cur = String(currency || 'EUR').toUpperCase();\n  if (cur === 'EUR') return 1;\n  if (cur === 'BGN') return 1.95583; // fixed conversion rate, BG uses EUR since 2026-01-01\n  const rates = (fx && fx.rates) || {};\n  const dates = Object.keys(rates).sort();\n  let rate = null;\n  for (const d of dates) if (d <= date && rates[d][cur]) rate = rates[d][cur];\n  if (rate === null) for (const d of dates) if (rates[d][cur]) { rate = rates[d][cur]; break; }\n  if (!rate) throw new Error(`Chýba kurz ECB pre ${cur} k ${date}`);\n  return rate;\n}\n\n// n8n HTTP node may emit one item per array element or one item wrapping the array.\nfunction unwrap(items, key) {\n  const out = [];\n  for (const { json } of items) {\n    const parts = Array.isArray(json) ? json : [json];\n    for (const p of parts) {\n      if (p && Array.isArray(p[key])) out.push(...p[key]);\n    }\n  }\n  return out;\n}\n\n// Rule -> Asana task type (used when a task is built from a finding without AI).\nconst RULE_TYPE = {\n  TRACKING_OUTAGE: 'TRACKING', NO_DATA: 'DATA_QUALITY', UNMAPPED: 'DATA_QUALITY',\n  PACING_OVER: 'BUDGET', PACING_UNDER: 'BUDGET',\n  KPI_BELOW_TARGET: 'PERFORMANCE', KPI_WOW_DROP: 'PERFORMANCE', CAMPAIGN_DROP: 'PERFORMANCE',\n  WASTE_NO_CONV: 'WASTE', SCALE_BUDGET: 'SCALE', CREATIVE_FATIGUE: 'CREATIVE',\n  SEARCH_TERMS: 'SEARCH_TERMS', POLICY: 'POLICY', LEARNING_LIMITED: 'LEARNING',\n};\nconst PRIORITY_ORDER = { P1: 0, P2: 1, P3: 2 };\n\n// BigQuery nodes run with \"Always Output Data\", so an empty result is one empty item.\nconst rows = (items) => items.map((i) => i.json).filter((j) => j && Object.keys(j).length > 0);\n\n// Alert-ID custom field text -> Set of alert keys.\nconst parseKeys = (text) => new Set(String(text || '').split(/[\\s,;]+/).map((s) => s.trim()).filter(Boolean));\n\n// Open tasks of the Asana project (paginated HTTP output) -> [{gid, name, url, keys:Set, priority}]\nfunction openTasks(items, alertFieldGid, priorityFieldGid) {\n  return unwrap(items, 'data').map((t) => {\n    const cf = (gid) => (t.custom_fields || []).find((c) => c.gid === gid);\n    const alert = cf(alertFieldGid);\n    const prio = priorityFieldGid ? cf(priorityFieldGid) : null;\n    return {\n      gid: t.gid,\n      name: t.name,\n      url: t.permalink_url,\n      keys: parseKeys(alert && (alert.text_value ?? alert.display_value)),\n      priority: prio ? ((prio.enum_value && prio.enum_value.name) || prio.display_value || '') : '',\n    };\n  });\n}\n\n// A finding turned into a task without AI (fallback, or update of an already-open task).\nfunction taskFromFinding(f, source) {\n  return {\n    alert_keys: [f.alert_key],\n    title: f.title.slice(0, 120),\n    country: f.country,\n    platform: f.platform,\n    type: RULE_TYPE[f.rule] || 'PERFORMANCE',\n    priority: f.severity,\n    diagnosis: f.summary_line,\n    action_steps: f.suggested_steps || [],\n    expected_impact: '',\n    expected_impact_eur: 0,\n    campaign_id: f.campaign_id || '',\n    source,\n    findings: [f],\n  };\n}\n\n// ---- wf1_norm_meta_issues.js ----\n// Meta ad sets (learning status) and ads (disapproved / with issues) -> entity_issues rows.\n// Both HTTP nodes feed this node; ads carry adset_id, ad sets do not.\nconst cfg = $('Config').first().json;\nconst accountMap = buildAccountMap($('Accounts').all());\nconst ingested = new Date().toISOString();\nconst out = [];\n\nfor (const r of unwrap($input.all(), 'data')) {\n  const campaignName = (r.campaign && r.campaign.name) || '';\n  const base = {\n    snapshot_date: cfg.until,\n    platform: 'META',\n    account_id: normId(r.account_id),\n    country: resolveCountry(accountMap, 'META', r.account_id, campaignName),\n    entity_id: String(r.id),\n    entity_name: r.name || '',\n    campaign_id: String(r.campaign_id || (r.campaign && r.campaign.id) || ''),\n    campaign_name: campaignName,\n    ingested_at: ingested,\n  };\n  if ('adset_id' in r) {\n    const detail = (r.issues_info || []).map((i) => i.error_summary || i.error_message).filter(Boolean).join(' | ');\n    out.push({ json: { ...base, entity_level: 'AD', issue: r.effective_status, detail } });\n  } else if (r.learning_stage_info && r.learning_stage_info.status === 'FAIL') {\n    out.push({ json: { ...base, entity_level: 'ADSET', issue: 'LEARNING_LIMITED', detail: 'Learning limited' } });\n  }\n}\nreturn out;\n"
+      },
+      "id": "fa18aa1f-52db-500c-a28c-a92a3b822e21",
+      "name": "Normalize Meta Issues",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        1000
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "insert",
+        "projectId": {
+          "__rl": true,
+          "value": "YOUR_GCP_PROJECT",
+          "mode": "id"
+        },
+        "datasetId": {
+          "__rl": true,
+          "value": "balabim_ads",
+          "mode": "id"
+        },
+        "tableId": {
+          "__rl": true,
+          "value": "entity_issues",
+          "mode": "id"
+        },
+        "dataMode": "autoMap",
+        "options": {}
+      },
+      "id": "5c353933-a986-54ab-908b-3a951bd8d3a5",
+      "name": "BQ entity_issues (Meta)",
+      "type": "n8n-nodes-base.googleBigQuery",
+      "typeVersion": 2.1,
+      "position": [
+        1960,
+        1000
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "REPLACE_ME",
+          "name": "Google Service Account (BigQuery + Sheets)"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Každý deň 06:00": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "FX",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FX": {
+      "main": [
+        [
+          {
+            "node": "Accounts",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Normalize FX",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize FX": {
+      "main": [
+        [
+          {
+            "node": "BQ fx_rates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Accounts": {
+      "main": [
+        [
+          {
+            "node": "Google Accounts",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Meta Accounts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Accounts": {
+      "main": [
+        [
+          {
+            "node": "GAds Campaigns",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "GAds Search Terms",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "GAds Disapproved Ads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GAds Campaigns": {
+      "main": [
+        [
+          {
+            "node": "Normalize GAds Perf",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize GAds Perf": {
+      "main": [
+        [
+          {
+            "node": "BQ daily_perf (Google)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GAds Search Terms": {
+      "main": [
+        [
+          {
+            "node": "Normalize GAds Search Terms",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize GAds Search Terms": {
+      "main": [
+        [
+          {
+            "node": "BQ search_terms (Google)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GAds Disapproved Ads": {
+      "main": [
+        [
+          {
+            "node": "Normalize GAds Issues",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize GAds Issues": {
+      "main": [
+        [
+          {
+            "node": "BQ entity_issues (Google)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Meta Accounts": {
+      "main": [
+        [
+          {
+            "node": "Meta Insights Daily",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Meta Insights 7d",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Meta Ad Sets",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Meta Ads With Issues",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Meta Insights Daily": {
+      "main": [
+        [
+          {
+            "node": "Normalize Meta Perf",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Meta Perf": {
+      "main": [
+        [
+          {
+            "node": "BQ daily_perf (Meta)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Meta Insights 7d": {
+      "main": [
+        [
+          {
+            "node": "Normalize Meta Frequency",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Meta Frequency": {
+      "main": [
+        [
+          {
+            "node": "BQ meta_adset_7d",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Meta Ad Sets": {
+      "main": [
+        [
+          {
+            "node": "Normalize Meta Issues",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Meta Issues": {
+      "main": [
+        [
+          {
+            "node": "BQ entity_issues (Meta)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Meta Ads With Issues": {
+      "main": [
+        [
+          {
+            "node": "Normalize Meta Issues",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Bratislava",
+    "saveManualExecutions": true
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}

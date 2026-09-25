@@ -1,0 +1,86 @@
+{
+  "name": "Balabim PPC – Error handler",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "b28287c0-f8ec-5d61-b81d-6c89a49bcfab",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shared helpers. build.py prepends this file to every Code node, so keep it\n// free of top-level side effects and never redeclare these names in node code.\nconst COUNTRIES = ['SK', 'CZ', 'HU', 'PL', 'RO', 'BG', 'HR', 'SI', 'GR'];\nconst PLATFORM_LABEL = { GOOGLE_ADS: 'Google Ads', META: 'Meta Ads', BOTH: 'Google + Meta' };\n\n// Accepts numbers, API strings (\"123.45\") and sheet values (\"3,5\", \"1 200 €\").\nfunction num(v) {\n  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;\n  if (v === null || v === undefined || v === '') return 0;\n  const n = Number(String(v).replace(/[\\s€%]/g, '').replace(',', '.'));\n  return Number.isFinite(n) ? n : 0;\n}\nconst round = (v, d = 2) => Math.round(num(v) * 10 ** d) / 10 ** d;\nconst safeDiv = (a, b) => (num(b) === 0 ? null : num(a) / num(b));\nconst pct = (v) => (v === null || v === undefined ? 'n/a' : `${round(v * 100, 1)} %`);\nconst eur = (v) => `${round(v, 0).toLocaleString('sk-SK')} €`;\nconst fmt = (v, d = 2) => (v === null || v === undefined ? 'n/a' : String(round(v, d)));\nconst normId = (id) => String(id ?? '').replace(/^act_/, '').replace(/-/g, '').trim();\nconst isActive = (v) => !['FALSE', 'NIE', '0', 'NO'].includes(String(v ?? 'TRUE').trim().toUpperCase());\n\n// Country from campaign name: SK_Search_Brand, \"PMax | HU | Feed\", \"Meta-RO-Prospecting\"...\nfunction countryFromName(name) {\n  const m = String(name || '').toUpperCase().match(/(?:^|[^A-Z])(SK|CZ|HU|PL|RO|BG|HR|SI|GR)(?=[^A-Z]|$)/);\n  return m ? m[1] : 'UNKNOWN';\n}\n\n// Rows of the \"accounts\" sheet -> { 'GOOGLE_ADS|1234567890': {country, currency, name} }\nfunction buildAccountMap(items) {\n  const map = {};\n  for (const { json: r } of items) {\n    if (!isActive(r.active)) continue;\n    const platform = String(r.platform || '').trim().toUpperCase();\n    map[`${platform}|${normId(r.account_id)}`] = {\n      country: String(r.country || '').trim().toUpperCase(),\n      currency: String(r.currency || '').trim().toUpperCase(),\n      name: r.account_name || '',\n    };\n  }\n  return map;\n}\n\n// Account-level country wins; accounts marked MULTI fall back to the campaign name.\nfunction resolveCountry(accountMap, platform, accountId, campaignName) {\n  const acc = accountMap[`${platform}|${normId(accountId)}`];\n  if (acc && COUNTRIES.includes(acc.country)) return acc.country;\n  return countryFromName(campaignName);\n}\n\n// fx = Frankfurter time series response {rates: {'YYYY-MM-DD': {CZK: 24.3, ...}}}, base EUR.\n// Returns units of `currency` per 1 EUR, using the latest rate on or before `date`.\nfunction fxRate(fx, currency, date) {\n  const cur = String(currency || 'EUR').toUpperCase();\n  if (cur === 'EUR') return 1;\n  if (cur === 'BGN') return 1.95583; // fixed conversion rate, BG uses EUR since 2026-01-01\n  const rates = (fx && fx.rates) || {};\n  const dates = Object.keys(rates).sort();\n  let rate = null;\n  for (const d of dates) if (d <= date && rates[d][cur]) rate = rates[d][cur];\n  if (rate === null) for (const d of dates) if (rates[d][cur]) { rate = rates[d][cur]; break; }\n  if (!rate) throw new Error(`Chýba kurz ECB pre ${cur} k ${date}`);\n  return rate;\n}\n\n// n8n HTTP node may emit one item per array element or one item wrapping the array.\nfunction unwrap(items, key) {\n  const out = [];\n  for (const { json } of items) {\n    const parts = Array.isArray(json) ? json : [json];\n    for (const p of parts) {\n      if (p && Array.isArray(p[key])) out.push(...p[key]);\n    }\n  }\n  return out;\n}\n\n// Rule -> Asana task type (used when a task is built from a finding without AI).\nconst RULE_TYPE = {\n  TRACKING_OUTAGE: 'TRACKING', NO_DATA: 'DATA_QUALITY', UNMAPPED: 'DATA_QUALITY',\n  PACING_OVER: 'BUDGET', PACING_UNDER: 'BUDGET',\n  KPI_BELOW_TARGET: 'PERFORMANCE', KPI_WOW_DROP: 'PERFORMANCE', CAMPAIGN_DROP: 'PERFORMANCE',\n  WASTE_NO_CONV: 'WASTE', SCALE_BUDGET: 'SCALE', CREATIVE_FATIGUE: 'CREATIVE',\n  SEARCH_TERMS: 'SEARCH_TERMS', POLICY: 'POLICY', LEARNING_LIMITED: 'LEARNING',\n};\nconst PRIORITY_ORDER = { P1: 0, P2: 1, P3: 2 };\n\n// BigQuery nodes run with \"Always Output Data\", so an empty result is one empty item.\nconst rows = (items) => items.map((i) => i.json).filter((j) => j && Object.keys(j).length > 0);\n\n// Alert-ID custom field text -> Set of alert keys.\nconst parseKeys = (text) => new Set(String(text || '').split(/[\\s,;]+/).map((s) => s.trim()).filter(Boolean));\n\n// Open tasks of the Asana project (paginated HTTP output) -> [{gid, name, url, keys:Set, priority}]\nfunction openTasks(items, alertFieldGid, priorityFieldGid) {\n  return unwrap(items, 'data').map((t) => {\n    const cf = (gid) => (t.custom_fields || []).find((c) => c.gid === gid);\n    const alert = cf(alertFieldGid);\n    const prio = priorityFieldGid ? cf(priorityFieldGid) : null;\n    return {\n      gid: t.gid,\n      name: t.name,\n      url: t.permalink_url,\n      keys: parseKeys(alert && (alert.text_value ?? alert.display_value)),\n      priority: prio ? ((prio.enum_value && prio.enum_value.name) || prio.display_value || '') : '',\n    };\n  });\n}\n\n// A finding turned into a task without AI (fallback, or update of an already-open task).\nfunction taskFromFinding(f, source) {\n  return {\n    alert_keys: [f.alert_key],\n    title: f.title.slice(0, 120),\n    country: f.country,\n    platform: f.platform,\n    type: RULE_TYPE[f.rule] || 'PERFORMANCE',\n    priority: f.severity,\n    diagnosis: f.summary_line,\n    action_steps: f.suggested_steps || [],\n    expected_impact: '',\n    expected_impact_eur: 0,\n    campaign_id: f.campaign_id || '',\n    source,\n    findings: [f],\n  };\n}\n\n// ---- wf_error.js ----\n// Error Trigger payload -> alert e-mail.\nconst e = $input.first().json;\nconst wf = (e.workflow && e.workflow.name) || 'neznámy workflow';\nconst ex = e.execution || {};\nconst err = ex.error || {};\nreturn [{\n  json: {\n    subject: `❌ n8n Balabim agent: chyba vo „${wf}“`,\n    text: [\n      `Workflow: ${wf}`,\n      `Node: ${ex.lastNodeExecuted || '?'}`,\n      `Chyba: ${err.message || JSON.stringify(err).slice(0, 500)}`,\n      ex.url ? `Exekúcia: ${ex.url}` : '',\n      '',\n      'Časté príčiny: expirovaný token (Meta System User, Google OAuth), zmena verzie API, limit API, chýbajúci kurz meny.',\n    ].filter((l) => l !== undefined).join('\\n'),\n  },\n}];\n"
+      },
+      "id": "8aacc948-863d-5066-a223-2852dbed9b54",
+      "name": "Format Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        280,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "n8n@your-agency.sk",
+        "toEmail": "ppc@your-agency.sk",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "text",
+        "text": "={{ $json.text }}",
+        "options": {}
+      },
+      "id": "ba47e45f-db66-5c28-868f-5d8b976a2c12",
+      "name": "Send Error Alert",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        560,
+        0
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "REPLACE_ME",
+          "name": "SMTP"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Format Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Error": {
+      "main": [
+        [
+          {
+            "node": "Send Error Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Bratislava",
+    "saveManualExecutions": true
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}

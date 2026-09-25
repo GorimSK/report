@@ -1,0 +1,38 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "tasks"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "2-3 vety o celkovom stave kampaní za včerajšok."
+    },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "alert_keys", "title", "country", "platform", "type", "priority",
+          "diagnosis", "action_steps", "expected_impact", "expected_impact_eur", "campaign_id"
+        ],
+        "properties": {
+          "alert_keys": { "type": "array", "items": { "type": "string" } },
+          "title": { "type": "string" },
+          "country": { "type": "string", "enum": ["SK", "CZ", "HU", "PL", "RO", "BG", "HR", "SI", "GR", "ALL"] },
+          "platform": { "type": "string", "enum": ["GOOGLE_ADS", "META", "BOTH"] },
+          "type": {
+            "type": "string",
+            "enum": ["TRACKING", "BUDGET", "PERFORMANCE", "WASTE", "SCALE", "CREATIVE", "SEARCH_TERMS", "POLICY", "LEARNING", "DATA_QUALITY"]
+          },
+          "priority": { "type": "string", "enum": ["P1", "P2", "P3"] },
+          "diagnosis": { "type": "string" },
+          "action_steps": { "type": "array", "items": { "type": "string" } },
+          "expected_impact": { "type": "string" },
+          "expected_impact_eur": { "type": "number" },
+          "campaign_id": { "type": "string" }
+        }
+      }
+    }
+  }
+}

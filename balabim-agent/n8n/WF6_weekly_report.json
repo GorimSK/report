@@ -1,0 +1,450 @@
+{
+  "name": "Balabim PPC – WF6 Týždenný report",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * 1"
+            }
+          ]
+        }
+      },
+      "id": "38a4914e-7e0d-5071-b339-f6be5cbcf65b",
+      "name": "Pondelok 08:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shared helpers. build.py prepends this file to every Code node, so keep it\n// free of top-level side effects and never redeclare these names in node code.\nconst COUNTRIES = ['SK', 'CZ', 'HU', 'PL', 'RO', 'BG', 'HR', 'SI', 'GR'];\nconst PLATFORM_LABEL = { GOOGLE_ADS: 'Google Ads', META: 'Meta Ads', BOTH: 'Google + Meta' };\n\n// Accepts numbers, API strings (\"123.45\") and sheet values (\"3,5\", \"1 200 €\").\nfunction num(v) {\n  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;\n  if (v === null || v === undefined || v === '') return 0;\n  const n = Number(String(v).replace(/[\\s€%]/g, '').replace(',', '.'));\n  return Number.isFinite(n) ? n : 0;\n}\nconst round = (v, d = 2) => Math.round(num(v) * 10 ** d) / 10 ** d;\nconst safeDiv = (a, b) => (num(b) === 0 ? null : num(a) / num(b));\nconst pct = (v) => (v === null || v === undefined ? 'n/a' : `${round(v * 100, 1)} %`);\nconst eur = (v) => `${round(v, 0).toLocaleString('sk-SK')} €`;\nconst fmt = (v, d = 2) => (v === null || v === undefined ? 'n/a' : String(round(v, d)));\nconst normId = (id) => String(id ?? '').replace(/^act_/, '').replace(/-/g, '').trim();\nconst isActive = (v) => !['FALSE', 'NIE', '0', 'NO'].includes(String(v ?? 'TRUE').trim().toUpperCase());\n\n// Country from campaign name: SK_Search_Brand, \"PMax | HU | Feed\", \"Meta-RO-Prospecting\"...\nfunction countryFromName(name) {\n  const m = String(name || '').toUpperCase().match(/(?:^|[^A-Z])(SK|CZ|HU|PL|RO|BG|HR|SI|GR)(?=[^A-Z]|$)/);\n  return m ? m[1] : 'UNKNOWN';\n}\n\n// Rows of the \"accounts\" sheet -> { 'GOOGLE_ADS|1234567890': {country, currency, name} }\nfunction buildAccountMap(items) {\n  const map = {};\n  for (const { json: r } of items) {\n    if (!isActive(r.active)) continue;\n    const platform = String(r.platform || '').trim().toUpperCase();\n    map[`${platform}|${normId(r.account_id)}`] = {\n      country: String(r.country || '').trim().toUpperCase(),\n      currency: String(r.currency || '').trim().toUpperCase(),\n      name: r.account_name || '',\n    };\n  }\n  return map;\n}\n\n// Account-level country wins; accounts marked MULTI fall back to the campaign name.\nfunction resolveCountry(accountMap, platform, accountId, campaignName) {\n  const acc = accountMap[`${platform}|${normId(accountId)}`];\n  if (acc && COUNTRIES.includes(acc.country)) return acc.country;\n  return countryFromName(campaignName);\n}\n\n// fx = Frankfurter time series response {rates: {'YYYY-MM-DD': {CZK: 24.3, ...}}}, base EUR.\n// Returns units of `currency` per 1 EUR, using the latest rate on or before `date`.\nfunction fxRate(fx, currency, date) {\n  const cur = String(currency || 'EUR').toUpperCase();\n  if (cur === 'EUR') return 1;\n  if (cur === 'BGN') return 1.95583; // fixed conversion rate, BG uses EUR since 2026-01-01\n  const rates = (fx && fx.rates) || {};\n  const dates = Object.keys(rates).sort();\n  let rate = null;\n  for (const d of dates) if (d <= date && rates[d][cur]) rate = rates[d][cur];\n  if (rate === null) for (const d of dates) if (rates[d][cur]) { rate = rates[d][cur]; break; }\n  if (!rate) throw new Error(`Chýba kurz ECB pre ${cur} k ${date}`);\n  return rate;\n}\n\n// n8n HTTP node may emit one item per array element or one item wrapping the array.\nfunction unwrap(items, key) {\n  const out = [];\n  for (const { json } of items) {\n    const parts = Array.isArray(json) ? json : [json];\n    for (const p of parts) {\n      if (p && Array.isArray(p[key])) out.push(...p[key]);\n    }\n  }\n  return out;\n}\n\n// Rule -> Asana task type (used when a task is built from a finding without AI).\nconst RULE_TYPE = {\n  TRACKING_OUTAGE: 'TRACKING', NO_DATA: 'DATA_QUALITY', UNMAPPED: 'DATA_QUALITY',\n  PACING_OVER: 'BUDGET', PACING_UNDER: 'BUDGET',\n  KPI_BELOW_TARGET: 'PERFORMANCE', KPI_WOW_DROP: 'PERFORMANCE', CAMPAIGN_DROP: 'PERFORMANCE',\n  WASTE_NO_CONV: 'WASTE', SCALE_BUDGET: 'SCALE', CREATIVE_FATIGUE: 'CREATIVE',\n  SEARCH_TERMS: 'SEARCH_TERMS', POLICY: 'POLICY', LEARNING_LIMITED: 'LEARNING',\n};\nconst PRIORITY_ORDER = { P1: 0, P2: 1, P3: 2 };\n\n// BigQuery nodes run with \"Always Output Data\", so an empty result is one empty item.\nconst rows = (items) => items.map((i) => i.json).filter((j) => j && Object.keys(j).length > 0);\n\n// Alert-ID custom field text -> Set of alert keys.\nconst parseKeys = (text) => new Set(String(text || '').split(/[\\s,;]+/).map((s) => s.trim()).filter(Boolean));\n\n// Open tasks of the Asana project (paginated HTTP output) -> [{gid, name, url, keys:Set, priority}]\nfunction openTasks(items, alertFieldGid, priorityFieldGid) {\n  return unwrap(items, 'data').map((t) => {\n    const cf = (gid) => (t.custom_fields || []).find((c) => c.gid === gid);\n    const alert = cf(alertFieldGid);\n    const prio = priorityFieldGid ? cf(priorityFieldGid) : null;\n    return {\n      gid: t.gid,\n      name: t.name,\n      url: t.permalink_url,\n      keys: parseKeys(alert && (alert.text_value ?? alert.display_value)),\n      priority: prio ? ((prio.enum_value && prio.enum_value.name) || prio.display_value || '') : '',\n    };\n  });\n}\n\n// A finding turned into a task without AI (fallback, or update of an already-open task).\nfunction taskFromFinding(f, source) {\n  return {\n    alert_keys: [f.alert_key],\n    title: f.title.slice(0, 120),\n    country: f.country,\n    platform: f.platform,\n    type: RULE_TYPE[f.rule] || 'PERFORMANCE',\n    priority: f.severity,\n    diagnosis: f.summary_line,\n    action_steps: f.suggested_steps || [],\n    expected_impact: '',\n    expected_impact_eur: 0,\n    campaign_id: f.campaign_id || '',\n    source,\n    findings: [f],\n  };\n}\n\n// ---- config_basic.js ----\n// Settings injected by build.py (config/settings*.json).\nconst S = {\n  \"timezone\": \"Europe/Bratislava\",\n  \"gcp_project\": \"YOUR_GCP_PROJECT\",\n  \"bq_dataset\": \"balabim_ads\",\n  \"bq_location\": \"EU\",\n  \"config_sheet_id\": \"YOUR_GOOGLE_SHEET_ID\",\n  \"gads_api_version\": \"v21\",\n  \"gads_login_customer_id\": \"1234567890\",\n  \"meta_api_version\": \"v23.0\",\n  \"meta_purchase_action_types\": [\n    \"omni_purchase\",\n    \"purchase\",\n    \"offsite_conversion.fb_pixel_purchase\"\n  ],\n  \"lookback_days\": 7,\n  \"search_terms_lookback_days\": 30,\n  \"anthropic_model\": \"claude-opus-5\",\n  \"anthropic_effort\": \"medium\",\n  \"max_new_tasks_per_run\": 10,\n  \"alert_email_from\": \"n8n@your-agency.sk\",\n  \"alert_email_to\": \"ppc@your-agency.sk\",\n  \"workflow_ids\": {\n    \"wf3_analyst\": \"REPLACE_AFTER_IMPORT\",\n    \"wf4_asana\": \"REPLACE_AFTER_IMPORT\",\n    \"error\": \"REPLACE_AFTER_IMPORT\"\n  },\n  \"rule_defaults\": {\n    \"pacing_tolerance\": 0.15,\n    \"pacing_min_days\": 5,\n    \"kpi_tolerance\": 0.15,\n    \"wow_drop\": 0.25,\n    \"wow_min_conv\": 5,\n    \"min_spend_7d_eur\": 100,\n    \"min_spend_campaign_7d_eur\": 50,\n    \"max_frequency\": 3.0,\n    \"outage_min_daily_conv\": 3,\n    \"outage_drop\": 0.7,\n    \"scale_lost_is_budget\": 0.2,\n    \"scale_min_conv\": 3,\n    \"search_term_min_cost_eur\": 15\n  },\n  \"asana\": {\n    \"workspace_gid\": \"REPLACE\",\n    \"project_gid\": \"REPLACE\",\n    \"section_new_gid\": \"REPLACE\",\n    \"default_assignee_gid\": \"\",\n    \"due_days\": {\n      \"P1\": 1,\n      \"P2\": 3,\n      \"P3\": 7\n    },\n    \"fields\": {\n      \"country\": {\n        \"gid\": \"REPLACE\",\n        \"options\": {\n          \"SK\": \"\",\n          \"CZ\": \"\",\n          \"HU\": \"\",\n          \"PL\": \"\",\n          \"RO\": \"\",\n          \"BG\": \"\",\n          \"HR\": \"\",\n          \"SI\": \"\",\n          \"GR\": \"\",\n          \"ALL\": \"\"\n        }\n      },\n      \"platform\": {\n        \"gid\": \"REPLACE\",\n        \"options\": {\n          \"GOOGLE_ADS\": \"\",\n          \"META\": \"\",\n          \"BOTH\": \"\"\n        }\n      },\n      \"type\": {\n        \"gid\": \"REPLACE\",\n        \"options\": {\n          \"TRACKING\": \"\",\n          \"BUDGET\": \"\",\n          \"PERFORMANCE\": \"\",\n          \"WASTE\": \"\",\n          \"SCALE\": \"\",\n          \"CREATIVE\": \"\",\n          \"SEARCH_TERMS\": \"\",\n          \"POLICY\": \"\",\n          \"LEARNING\": \"\",\n          \"DATA_QUALITY\": \"\"\n        }\n      },\n      \"priority\": {\n        \"gid\": \"REPLACE\",\n        \"options\": {\n          \"P1\": \"\",\n          \"P2\": \"\",\n          \"P3\": \"\"\n        }\n      },\n      \"alert_id\": {\n        \"gid\": \"REPLACE\"\n      },\n      \"impact\": {\n        \"gid\": \"REPLACE\"\n      }\n    }\n  },\n  \"weekly_system\": \"Si senior PPC špecialista. Píšeš týždenný stav kampaní e-shopu **Balabim** (Google Ads + Meta Ads, 9 krajín) pre interný tím v Asane.\\n\\nDostaneš tabuľku KPI za posledných 7 dní vs. predchádzajúcich 7 dní, čerpanie rozpočtov od začiatku mesiaca a zoznam otvorených úloh agenta.\\n\\nNapíš po slovensky, max. 200 slov, bez úvodných fráz:\\n1. **Celkovo**: 1–2 vety o týždni (náklady, obrat, ROAS, trend).\\n2. **Top 3 problémy**: krajina + platforma, číslo a jedna veta, čo s tým.\\n3. **Top 3 príležitosti**: kde sa oplatí pridať rozpočet alebo testovať.\\n4. **Rozpočty**: krajiny, ktoré hrozí prečerpať alebo podčerpať.\\n\\nPoužívaj iba čísla zo vstupu, nič si nevymýšľaj. Formát: obyčajný text s odrážkami „•“ (bez Markdown nadpisov a tabuliek).\\n\"\n};\nreturn [{ json: { ...S, today: $today.toISODate(), yesterday: $today.minus({ days: 1 }).toISODate() } }];\n"
+      },
+      "id": "f4e88c9e-7bf5-5b45-9fe1-fb76d8b1d98d",
+      "name": "Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        280,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "executeQuery",
+        "projectId": {
+          "__rl": true,
+          "value": "YOUR_GCP_PROJECT",
+          "mode": "id"
+        },
+        "sqlQuery": "-- WF6: týždenný súhrn (posledných 7 dní vs. predchádzajúcich 7) a MTD po platforme a krajine.\nWITH p AS (\n  SELECT DATE_SUB(CURRENT_DATE('Europe/Bratislava'), INTERVAL 1 DAY) AS d\n)\nSELECT\n  f.platform, f.country,\n  SUM(IF(f.date > DATE_SUB(p.d, INTERVAL 7 DAY), f.cost_eur, 0)) AS cost_7d,\n  SUM(IF(f.date > DATE_SUB(p.d, INTERVAL 7 DAY), f.conv_value_eur, 0)) AS value_7d,\n  SUM(IF(f.date > DATE_SUB(p.d, INTERVAL 7 DAY), f.conversions, 0)) AS conv_7d,\n  SUM(IF(f.date <= DATE_SUB(p.d, INTERVAL 7 DAY), f.cost_eur, 0)) AS cost_p7,\n  SUM(IF(f.date <= DATE_SUB(p.d, INTERVAL 7 DAY), f.conv_value_eur, 0)) AS value_p7,\n  SUM(IF(f.date <= DATE_SUB(p.d, INTERVAL 7 DAY), f.conversions, 0)) AS conv_p7,\n  ANY_VALUE(p.d) AS run_date\nFROM `YOUR_GCP_PROJECT.balabim_ads.v_daily_perf` f\nCROSS JOIN p\nWHERE f.date BETWEEN DATE_SUB(p.d, INTERVAL 13 DAY) AND p.d\nGROUP BY f.platform, f.country\nORDER BY f.country, f.platform\n",
+        "options": {
+          "location": "EU"
+        }
+      },
+      "id": "460e7f9c-f914-52e8-89fe-ead4a458e7c7",
+      "name": "BQ Weekly",
+      "type": "n8n-nodes-base.googleBigQuery",
+      "typeVersion": 2.1,
+      "position": [
+        560,
+        0
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "REPLACE_ME",
+          "name": "Google Service Account (BigQuery + Sheets)"
+        }
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "executeQuery",
+        "projectId": {
+          "__rl": true,
+          "value": "YOUR_GCP_PROJECT",
+          "mode": "id"
+        },
+        "sqlQuery": "-- WF6: čerpanie od začiatku mesiaca po platforme a krajine.\nWITH p AS (\n  SELECT DATE_SUB(CURRENT_DATE('Europe/Bratislava'), INTERVAL 1 DAY) AS d\n)\nSELECT\n  f.platform, f.country,\n  SUM(f.cost_eur) AS cost_mtd,\n  SUM(f.conv_value_eur) AS value_mtd,\n  ANY_VALUE(EXTRACT(DAY FROM p.d)) AS days_elapsed,\n  ANY_VALUE(EXTRACT(DAY FROM LAST_DAY(p.d))) AS days_in_month\nFROM `YOUR_GCP_PROJECT.balabim_ads.v_daily_perf` f\nCROSS JOIN p\nWHERE f.date BETWEEN DATE_TRUNC(p.d, MONTH) AND p.d\nGROUP BY f.platform, f.country\n",
+        "options": {
+          "location": "EU"
+        }
+      },
+      "id": "66e3e252-dac5-547d-928c-2ebfe4b7174c",
+      "name": "BQ MTD",
+      "type": "n8n-nodes-base.googleBigQuery",
+      "typeVersion": 2.1,
+      "position": [
+        840,
+        0
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "REPLACE_ME",
+          "name": "Google Service Account (BigQuery + Sheets)"
+        }
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "targets",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "c8fbacbc-c427-5571-a027-75cfdabbc328",
+      "name": "Targets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1120,
+        0
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "REPLACE_ME",
+          "name": "Google Service Account (BigQuery + Sheets)"
+        }
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://app.asana.com/api/1.0/projects/{{ $('Config').first().json.asana.project_gid }}/tasks",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "asanaApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "completed_since",
+              "value": "now"
+            },
+            {
+              "name": "limit",
+              "value": "100"
+            },
+            {
+              "name": "opt_fields",
+              "value": "name,permalink_url,custom_fields.gid,custom_fields.text_value,custom_fields.display_value,custom_fields.enum_value.name"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000,
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {
+                "parameters": [
+                  {
+                    "type": "qs",
+                    "name": "offset",
+                    "value": "={{ $response.body.next_page.offset }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body.next_page }}",
+              "limitPagesFetched": true,
+              "maxRequests": 20
+            }
+          }
+        }
+      },
+      "id": "b09cf028-630e-5671-8c2b-2e15bafb6892",
+      "name": "Asana Open Tasks",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1400,
+        0
+      ],
+      "credentials": {
+        "asanaApi": {
+          "id": "REPLACE_ME",
+          "name": "Asana"
+        }
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shared helpers. build.py prepends this file to every Code node, so keep it\n// free of top-level side effects and never redeclare these names in node code.\nconst COUNTRIES = ['SK', 'CZ', 'HU', 'PL', 'RO', 'BG', 'HR', 'SI', 'GR'];\nconst PLATFORM_LABEL = { GOOGLE_ADS: 'Google Ads', META: 'Meta Ads', BOTH: 'Google + Meta' };\n\n// Accepts numbers, API strings (\"123.45\") and sheet values (\"3,5\", \"1 200 €\").\nfunction num(v) {\n  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;\n  if (v === null || v === undefined || v === '') return 0;\n  const n = Number(String(v).replace(/[\\s€%]/g, '').replace(',', '.'));\n  return Number.isFinite(n) ? n : 0;\n}\nconst round = (v, d = 2) => Math.round(num(v) * 10 ** d) / 10 ** d;\nconst safeDiv = (a, b) => (num(b) === 0 ? null : num(a) / num(b));\nconst pct = (v) => (v === null || v === undefined ? 'n/a' : `${round(v * 100, 1)} %`);\nconst eur = (v) => `${round(v, 0).toLocaleString('sk-SK')} €`;\nconst fmt = (v, d = 2) => (v === null || v === undefined ? 'n/a' : String(round(v, d)));\nconst normId = (id) => String(id ?? '').replace(/^act_/, '').replace(/-/g, '').trim();\nconst isActive = (v) => !['FALSE', 'NIE', '0', 'NO'].includes(String(v ?? 'TRUE').trim().toUpperCase());\n\n// Country from campaign name: SK_Search_Brand, \"PMax | HU | Feed\", \"Meta-RO-Prospecting\"...\nfunction countryFromName(name) {\n  const m = String(name || '').toUpperCase().match(/(?:^|[^A-Z])(SK|CZ|HU|PL|RO|BG|HR|SI|GR)(?=[^A-Z]|$)/);\n  return m ? m[1] : 'UNKNOWN';\n}\n\n// Rows of the \"accounts\" sheet -> { 'GOOGLE_ADS|1234567890': {country, currency, name} }\nfunction buildAccountMap(items) {\n  const map = {};\n  for (const { json: r } of items) {\n    if (!isActive(r.active)) continue;\n    const platform = String(r.platform || '').trim().toUpperCase();\n    map[`${platform}|${normId(r.account_id)}`] = {\n      country: String(r.country || '').trim().toUpperCase(),\n      currency: String(r.currency || '').trim().toUpperCase(),\n      name: r.account_name || '',\n    };\n  }\n  return map;\n}\n\n// Account-level country wins; accounts marked MULTI fall back to the campaign name.\nfunction resolveCountry(accountMap, platform, accountId, campaignName) {\n  const acc = accountMap[`${platform}|${normId(accountId)}`];\n  if (acc && COUNTRIES.includes(acc.country)) return acc.country;\n  return countryFromName(campaignName);\n}\n\n// fx = Frankfurter time series response {rates: {'YYYY-MM-DD': {CZK: 24.3, ...}}}, base EUR.\n// Returns units of `currency` per 1 EUR, using the latest rate on or before `date`.\nfunction fxRate(fx, currency, date) {\n  const cur = String(currency || 'EUR').toUpperCase();\n  if (cur === 'EUR') return 1;\n  if (cur === 'BGN') return 1.95583; // fixed conversion rate, BG uses EUR since 2026-01-01\n  const rates = (fx && fx.rates) || {};\n  const dates = Object.keys(rates).sort();\n  let rate = null;\n  for (const d of dates) if (d <= date && rates[d][cur]) rate = rates[d][cur];\n  if (rate === null) for (const d of dates) if (rates[d][cur]) { rate = rates[d][cur]; break; }\n  if (!rate) throw new Error(`Chýba kurz ECB pre ${cur} k ${date}`);\n  return rate;\n}\n\n// n8n HTTP node may emit one item per array element or one item wrapping the array.\nfunction unwrap(items, key) {\n  const out = [];\n  for (const { json } of items) {\n    const parts = Array.isArray(json) ? json : [json];\n    for (const p of parts) {\n      if (p && Array.isArray(p[key])) out.push(...p[key]);\n    }\n  }\n  return out;\n}\n\n// Rule -> Asana task type (used when a task is built from a finding without AI).\nconst RULE_TYPE = {\n  TRACKING_OUTAGE: 'TRACKING', NO_DATA: 'DATA_QUALITY', UNMAPPED: 'DATA_QUALITY',\n  PACING_OVER: 'BUDGET', PACING_UNDER: 'BUDGET',\n  KPI_BELOW_TARGET: 'PERFORMANCE', KPI_WOW_DROP: 'PERFORMANCE', CAMPAIGN_DROP: 'PERFORMANCE',\n  WASTE_NO_CONV: 'WASTE', SCALE_BUDGET: 'SCALE', CREATIVE_FATIGUE: 'CREATIVE',\n  SEARCH_TERMS: 'SEARCH_TERMS', POLICY: 'POLICY', LEARNING_LIMITED: 'LEARNING',\n};\nconst PRIORITY_ORDER = { P1: 0, P2: 1, P3: 2 };\n\n// BigQuery nodes run with \"Always Output Data\", so an empty result is one empty item.\nconst rows = (items) => items.map((i) => i.json).filter((j) => j && Object.keys(j).length > 0);\n\n// Alert-ID custom field text -> Set of alert keys.\nconst parseKeys = (text) => new Set(String(text || '').split(/[\\s,;]+/).map((s) => s.trim()).filter(Boolean));\n\n// Open tasks of the Asana project (paginated HTTP output) -> [{gid, name, url, keys:Set, priority}]\nfunction openTasks(items, alertFieldGid, priorityFieldGid) {\n  return unwrap(items, 'data').map((t) => {\n    const cf = (gid) => (t.custom_fields || []).find((c) => c.gid === gid);\n    const alert = cf(alertFieldGid);\n    const prio = priorityFieldGid ? cf(priorityFieldGid) : null;\n    return {\n      gid: t.gid,\n      name: t.name,\n      url: t.permalink_url,\n      keys: parseKeys(alert && (alert.text_value ?? alert.display_value)),\n      priority: prio ? ((prio.enum_value && prio.enum_value.name) || prio.display_value || '') : '',\n    };\n  });\n}\n\n// A finding turned into a task without AI (fallback, or update of an already-open task).\nfunction taskFromFinding(f, source) {\n  return {\n    alert_keys: [f.alert_key],\n    title: f.title.slice(0, 120),\n    country: f.country,\n    platform: f.platform,\n    type: RULE_TYPE[f.rule] || 'PERFORMANCE',\n    priority: f.severity,\n    diagnosis: f.summary_line,\n    action_steps: f.suggested_steps || [],\n    expected_impact: '',\n    expected_impact_eur: 0,\n    campaign_id: f.campaign_id || '',\n    source,\n    findings: [f],\n  };\n}\n\n// ---- wf6_build.js ----\n// Weekly KPI table per country × platform + status type + Claude request body.\nconst cfg = $('Config').first().json;\nconst weekly = rows($('BQ Weekly').all());\nconst mtd = Object.fromEntries(rows($('BQ MTD').all()).map((r) => [`${r.platform}|${r.country}`, r]));\nconst targets = {};\nfor (const { json: t } of $('Targets').all()) {\n  if (isActive(t.active)) targets[`${String(t.platform).trim().toUpperCase()}|${String(t.country).trim().toUpperCase()}`] = t;\n}\nconst open = openTasks($('Asana Open Tasks').all(), cfg.asana.fields.alert_id.gid, cfg.asana.fields.priority.gid);\n\nlet atRisk = 0;\nconst table = weekly.map((r) => {\n  const key = `${r.platform}|${r.country}`;\n  const t = targets[key] || {};\n  const m = mtd[key] || {};\n  const roas = safeDiv(r.value_7d, r.cost_7d), roasP = safeDiv(r.value_p7, r.cost_p7);\n  const budget = num(t.monthly_budget_eur);\n  const projected = num(m.days_elapsed) ? (num(m.cost_mtd) / num(m.days_elapsed)) * num(m.days_in_month) : null;\n  const pacing = budget && projected !== null ? projected / budget - 1 : null;\n  const targetRoas = num(t.target_roas);\n  if (targetRoas && roas !== null && roas < targetRoas * 0.85) atRisk += 1;\n  return {\n    krajina: r.country, platforma: PLATFORM_LABEL[r.platform] || r.platform,\n    naklady_7d: round(r.cost_7d, 0), obrat_7d: round(r.value_7d, 0), konverzie_7d: round(r.conv_7d, 1),\n    roas_7d: roas === null ? null : round(roas), roas_minuly_tyzden: roasP === null ? null : round(roasP),\n    ciel_roas: targetRoas || null,\n    mtd_naklady: round(m.cost_mtd, 0), mesacny_rozpocet: budget || null, projekcia_vs_rozpocet: pacing === null ? null : round(pacing, 3),\n  };\n});\nconst openP1 = open.filter((t) => t.priority === 'P1').length;\nconst status_type = openP1 ? 'off_track' : atRisk >= 2 ? 'at_risk' : 'on_track';\nconst totals = table.reduce((a, r) => ({ cost: a.cost + r.naklady_7d, value: a.value + r.obrat_7d }), { cost: 0, value: 0 });\n\nconst body = {\n  model: cfg.anthropic_model,\n  max_tokens: 4000,\n  thinking: { type: 'adaptive' },\n  output_config: { effort: 'low' },\n  fallbacks: 'default',\n  system: cfg.weekly_system,\n  messages: [{\n    role: 'user',\n    content: [\n      `Týždeň končiaci ${cfg.yesterday}.`,\n      '', 'KPI (EUR):', JSON.stringify(table, null, 1),\n      '', `Otvorené úlohy agenta (${open.length}):`, open.map((t) => `- [${t.priority || '?'}] ${t.name}`).join('\\n') || '(žiadne)',\n    ].join('\\n'),\n  }],\n};\n\nreturn [{ json: { table, status_type, totals, open_count: open.length, body } }];\n"
+      },
+      "id": "b6bb4060-1ed8-5018-9c06-73cdf416d93c",
+      "name": "Build Weekly",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "anthropic-beta",
+              "value": "server-side-fallback-2026-07-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "id": "3b9b7214-ef62-5a3a-a15b-825672e8ba30",
+      "name": "Claude",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1960,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_ME",
+          "name": "Anthropic API key"
+        }
+      },
+      "maxTries": 2,
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shared helpers. build.py prepends this file to every Code node, so keep it\n// free of top-level side effects and never redeclare these names in node code.\nconst COUNTRIES = ['SK', 'CZ', 'HU', 'PL', 'RO', 'BG', 'HR', 'SI', 'GR'];\nconst PLATFORM_LABEL = { GOOGLE_ADS: 'Google Ads', META: 'Meta Ads', BOTH: 'Google + Meta' };\n\n// Accepts numbers, API strings (\"123.45\") and sheet values (\"3,5\", \"1 200 €\").\nfunction num(v) {\n  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;\n  if (v === null || v === undefined || v === '') return 0;\n  const n = Number(String(v).replace(/[\\s€%]/g, '').replace(',', '.'));\n  return Number.isFinite(n) ? n : 0;\n}\nconst round = (v, d = 2) => Math.round(num(v) * 10 ** d) / 10 ** d;\nconst safeDiv = (a, b) => (num(b) === 0 ? null : num(a) / num(b));\nconst pct = (v) => (v === null || v === undefined ? 'n/a' : `${round(v * 100, 1)} %`);\nconst eur = (v) => `${round(v, 0).toLocaleString('sk-SK')} €`;\nconst fmt = (v, d = 2) => (v === null || v === undefined ? 'n/a' : String(round(v, d)));\nconst normId = (id) => String(id ?? '').replace(/^act_/, '').replace(/-/g, '').trim();\nconst isActive = (v) => !['FALSE', 'NIE', '0', 'NO'].includes(String(v ?? 'TRUE').trim().toUpperCase());\n\n// Country from campaign name: SK_Search_Brand, \"PMax | HU | Feed\", \"Meta-RO-Prospecting\"...\nfunction countryFromName(name) {\n  const m = String(name || '').toUpperCase().match(/(?:^|[^A-Z])(SK|CZ|HU|PL|RO|BG|HR|SI|GR)(?=[^A-Z]|$)/);\n  return m ? m[1] : 'UNKNOWN';\n}\n\n// Rows of the \"accounts\" sheet -> { 'GOOGLE_ADS|1234567890': {country, currency, name} }\nfunction buildAccountMap(items) {\n  const map = {};\n  for (const { json: r } of items) {\n    if (!isActive(r.active)) continue;\n    const platform = String(r.platform || '').trim().toUpperCase();\n    map[`${platform}|${normId(r.account_id)}`] = {\n      country: String(r.country || '').trim().toUpperCase(),\n      currency: String(r.currency || '').trim().toUpperCase(),\n      name: r.account_name || '',\n    };\n  }\n  return map;\n}\n\n// Account-level country wins; accounts marked MULTI fall back to the campaign name.\nfunction resolveCountry(accountMap, platform, accountId, campaignName) {\n  const acc = accountMap[`${platform}|${normId(accountId)}`];\n  if (acc && COUNTRIES.includes(acc.country)) return acc.country;\n  return countryFromName(campaignName);\n}\n\n// fx = Frankfurter time series response {rates: {'YYYY-MM-DD': {CZK: 24.3, ...}}}, base EUR.\n// Returns units of `currency` per 1 EUR, using the latest rate on or before `date`.\nfunction fxRate(fx, currency, date) {\n  const cur = String(currency || 'EUR').toUpperCase();\n  if (cur === 'EUR') return 1;\n  if (cur === 'BGN') return 1.95583; // fixed conversion rate, BG uses EUR since 2026-01-01\n  const rates = (fx && fx.rates) || {};\n  const dates = Object.keys(rates).sort();\n  let rate = null;\n  for (const d of dates) if (d <= date && rates[d][cur]) rate = rates[d][cur];\n  if (rate === null) for (const d of dates) if (rates[d][cur]) { rate = rates[d][cur]; break; }\n  if (!rate) throw new Error(`Chýba kurz ECB pre ${cur} k ${date}`);\n  return rate;\n}\n\n// n8n HTTP node may emit one item per array element or one item wrapping the array.\nfunction unwrap(items, key) {\n  const out = [];\n  for (const { json } of items) {\n    const parts = Array.isArray(json) ? json : [json];\n    for (const p of parts) {\n      if (p && Array.isArray(p[key])) out.push(...p[key]);\n    }\n  }\n  return out;\n}\n\n// Rule -> Asana task type (used when a task is built from a finding without AI).\nconst RULE_TYPE = {\n  TRACKING_OUTAGE: 'TRACKING', NO_DATA: 'DATA_QUALITY', UNMAPPED: 'DATA_QUALITY',\n  PACING_OVER: 'BUDGET', PACING_UNDER: 'BUDGET',\n  KPI_BELOW_TARGET: 'PERFORMANCE', KPI_WOW_DROP: 'PERFORMANCE', CAMPAIGN_DROP: 'PERFORMANCE',\n  WASTE_NO_CONV: 'WASTE', SCALE_BUDGET: 'SCALE', CREATIVE_FATIGUE: 'CREATIVE',\n  SEARCH_TERMS: 'SEARCH_TERMS', POLICY: 'POLICY', LEARNING_LIMITED: 'LEARNING',\n};\nconst PRIORITY_ORDER = { P1: 0, P2: 1, P3: 2 };\n\n// BigQuery nodes run with \"Always Output Data\", so an empty result is one empty item.\nconst rows = (items) => items.map((i) => i.json).filter((j) => j && Object.keys(j).length > 0);\n\n// Alert-ID custom field text -> Set of alert keys.\nconst parseKeys = (text) => new Set(String(text || '').split(/[\\s,;]+/).map((s) => s.trim()).filter(Boolean));\n\n// Open tasks of the Asana project (paginated HTTP output) -> [{gid, name, url, keys:Set, priority}]\nfunction openTasks(items, alertFieldGid, priorityFieldGid) {\n  return unwrap(items, 'data').map((t) => {\n    const cf = (gid) => (t.custom_fields || []).find((c) => c.gid === gid);\n    const alert = cf(alertFieldGid);\n    const prio = priorityFieldGid ? cf(priorityFieldGid) : null;\n    return {\n      gid: t.gid,\n      name: t.name,\n      url: t.permalink_url,\n      keys: parseKeys(alert && (alert.text_value ?? alert.display_value)),\n      priority: prio ? ((prio.enum_value && prio.enum_value.name) || prio.display_value || '') : '',\n    };\n  });\n}\n\n// A finding turned into a task without AI (fallback, or update of an already-open task).\nfunction taskFromFinding(f, source) {\n  return {\n    alert_keys: [f.alert_key],\n    title: f.title.slice(0, 120),\n    country: f.country,\n    platform: f.platform,\n    type: RULE_TYPE[f.rule] || 'PERFORMANCE',\n    priority: f.severity,\n    diagnosis: f.summary_line,\n    action_steps: f.suggested_steps || [],\n    expected_impact: '',\n    expected_impact_eur: 0,\n    campaign_id: f.campaign_id || '',\n    source,\n    findings: [f],\n  };\n}\n\n// ---- wf6_compose.js ----\n// Claude commentary (or a fallback note) + KPI table -> Asana project status update.\nconst cfg = $('Config').first().json;\nconst b = $('Build Weekly').first().json;\nconst res = $input.first().json || {};\nconst ai = res.stop_reason && res.stop_reason !== 'refusal'\n  ? (res.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('').trim()\n  : '';\n\nconst line = (r) => `• ${r.krajina} ${r.platforma}: náklady ${eur(r.naklady_7d)}, ROAS ${fmt(r.roas_7d)} (min. týždeň ${fmt(r.roas_minuly_tyzden)}, cieľ ${fmt(r.ciel_roas)}), MTD ${eur(r.mtd_naklady)}${r.projekcia_vs_rozpocet === null ? '' : ` / projekcia ${pct(r.projekcia_vs_rozpocet)} vs. rozpočet`}`;\nconst text = [\n  ai || '(AI komentár nie je k dispozícii, nižšie sú iba čísla.)',\n  '',\n  `SPOLU 7 dní: náklady ${eur(b.totals.cost)}, obrat ${eur(b.totals.value)}, ROAS ${fmt(safeDiv(b.totals.value, b.totals.cost))}. Otvorené úlohy agenta: ${b.open_count}.`,\n  '',\n  'KRAJINY',\n  ...b.table.map(line),\n  '',\n  '🤖 Vygenerované PPC agentom (n8n).',\n].join('\\n');\n\nreturn [{\n  json: {\n    status_body: {\n      data: {\n        parent: cfg.asana.project_gid,\n        status_type: b.status_type,\n        title: `Týždenný stav PPC – týždeň do ${cfg.yesterday}`,\n        text,\n      },\n    },\n    email_subject: `Balabim PPC – týždenný stav do ${cfg.yesterday}`,\n    email_text: text,\n  },\n}];\n"
+      },
+      "id": "63e5f58d-b309-5442-8738-8ab6c03373e2",
+      "name": "Compose Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://app.asana.com/api/1.0/status_updates",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "asanaApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.status_body) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "c7bdc97d-d51c-5799-816d-620e93f436d1",
+      "name": "Post Status Update",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2520,
+        0
+      ],
+      "credentials": {
+        "asanaApi": {
+          "id": "REPLACE_ME",
+          "name": "Asana"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "fromEmail": "n8n@your-agency.sk",
+        "toEmail": "ppc@your-agency.sk",
+        "subject": "={{ $('Compose Status').first().json.email_subject }}",
+        "emailFormat": "text",
+        "text": "={{ $('Compose Status').first().json.email_text }}",
+        "options": {}
+      },
+      "id": "504ae18b-19d7-5880-ae57-05bc339533f0",
+      "name": "Email Weekly",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        2800,
+        0
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "REPLACE_ME",
+          "name": "SMTP"
+        }
+      },
+      "disabled": true
+    }
+  ],
+  "connections": {
+    "Pondelok 08:00": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "BQ Weekly",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "BQ Weekly": {
+      "main": [
+        [
+          {
+            "node": "BQ MTD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "BQ MTD": {
+      "main": [
+        [
+          {
+            "node": "Targets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Targets": {
+      "main": [
+        [
+          {
+            "node": "Asana Open Tasks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Asana Open Tasks": {
+      "main": [
+        [
+          {
+            "node": "Build Weekly",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Weekly": {
+      "main": [
+        [
+          {
+            "node": "Claude",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude": {
+      "main": [
+        [
+          {
+            "node": "Compose Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compose Status": {
+      "main": [
+        [
+          {
+            "node": "Post Status Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post Status Update": {
+      "main": [
+        [
+          {
+            "node": "Email Weekly",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Bratislava",
+    "saveManualExecutions": true
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
