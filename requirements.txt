@@ -3,3 +3,4 @@ oauth2client==4.1.3
 pandas==1.3.5
 plotly==5.16.1
 streamlit
+anthropic>=1.8.0
