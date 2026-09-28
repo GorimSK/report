@@ -1,0 +1,37 @@
+{
+  "spreadsheet": "MARKETING-DATA",
+  "currency": "EUR",
+  "monthly_budget": {
+    "google_ads": 3000,
+    "meta": 2000
+  },
+  "report_tab": "AI_Report",
+  "sources": [
+    {
+      "name": "google_ads",
+      "tab": "Google_Ads",
+      "columns": {
+        "date": "Date",
+        "campaign": "Campaign",
+        "spend": "Cost",
+        "impressions": "Impressions",
+        "clicks": "Clicks",
+        "conversions": "Conversions",
+        "revenue": "Conv. value"
+      }
+    },
+    {
+      "name": "meta",
+      "tab": "Meta_Ads",
+      "columns": {
+        "date": "date_start",
+        "campaign": "campaign_name",
+        "spend": "spend",
+        "impressions": "impressions",
+        "clicks": "clicks",
+        "conversions": "purchases",
+        "revenue": "purchase_value"
+      }
+    }
+  ]
+}

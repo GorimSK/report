@@ -1,0 +1,20 @@
+# Credentials – nikdy necommitovať
+*.json
+!config.example.json
+!tests/fixtures/*.json
+.env
+secrets/
+
+# Lokálna konfigurácia a výstupy
+config.json
+reports/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# IDE
+.idea/
