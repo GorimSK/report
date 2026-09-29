@@ -21,6 +21,11 @@ on the web v nastaveniach environmentu).
 | `GOOGLE_PROJECT_ID` | GCP projekt (default `groow-reporting`) |
 | `GOOGLE_ADS_LOGIN_CUSTOMER_ID` | ID MCC účtu bez pomlčiek (default `6816575574`) |
 
+Lokálne stačí mať súbory v `~/.config/google-ads-mcp/` – launcher ich nájde sám:
+
+- `adc.json` – ADC z kroku 3 nižšie,
+- `developer_token` – developer token (jeden riadok).
+
 ## Postup
 
 1. V GCP projekte zapni [Google Ads API](https://console.cloud.google.com/apis/library/googleads.googleapis.com).
