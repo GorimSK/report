@@ -1,7 +1,8 @@
 # Google Ads MCP
 
 Oficiálny server [googleads/google-ads-mcp](https://github.com/googleads/google-ads-mcp)
-je nakonfigurovaný v `.mcp.json` (spúšťa sa cez `uvx`, verzia `0.0.4`).
+je nakonfigurovaný v `.mcp.json` (spúšťa sa cez `uvx`, verzia `0.0.4`,
+launcher `scripts/google_ads_mcp.py`).
 Claude Code ho načíta automaticky pri otvorení repa.
 
 Tools: `customers_list_accessible_customers`, `search_search` (GAQL reporty),
@@ -15,7 +16,8 @@ on the web v nastaveniach environmentu).
 | Premenná | Popis |
 | --- | --- |
 | `GOOGLE_ADS_DEVELOPER_TOKEN` | Developer token z Google Ads → Nástroje → API Center (min. Explorer access) |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Cesta k ADC JSON so scope `https://www.googleapis.com/auth/adwords` |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Lokálne: cesta k ADC JSON so scope `https://www.googleapis.com/auth/adwords` |
+| `GOOGLE_ADS_ADC_JSON` | Web: obsah toho istého ADC JSON (raw alebo base64) – použije sa, ak nie je nastavená cesta vyššie |
 | `GOOGLE_PROJECT_ID` | GCP projekt (default `groow-reporting`) |
 | `GOOGLE_ADS_LOGIN_CUSTOMER_ID` | ID MCC účtu bez pomlčiek (default `6816575574`) |
 

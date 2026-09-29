@@ -2,11 +2,12 @@
   "mcpServers": {
     "google-ads": {
       "command": "uvx",
-      "args": ["--from", "google-ads-mcp==0.0.4", "google-ads-mcp"],
+      "args": ["--from", "google-ads-mcp==0.0.4", "python", "scripts/google_ads_mcp.py"],
       "env": {
-        "GOOGLE_APPLICATION_CREDENTIALS": "${GOOGLE_APPLICATION_CREDENTIALS}",
+        "GOOGLE_APPLICATION_CREDENTIALS": "${GOOGLE_APPLICATION_CREDENTIALS:-}",
+        "GOOGLE_ADS_ADC_JSON": "${GOOGLE_ADS_ADC_JSON:-}",
         "GOOGLE_PROJECT_ID": "${GOOGLE_PROJECT_ID:-groow-reporting}",
-        "GOOGLE_ADS_DEVELOPER_TOKEN": "${GOOGLE_ADS_DEVELOPER_TOKEN}",
+        "GOOGLE_ADS_DEVELOPER_TOKEN": "${GOOGLE_ADS_DEVELOPER_TOKEN:-}",
         "GOOGLE_ADS_LOGIN_CUSTOMER_ID": "${GOOGLE_ADS_LOGIN_CUSTOMER_ID:-6816575574}"
       }
     }
