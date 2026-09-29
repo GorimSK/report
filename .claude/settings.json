@@ -1,5 +1,5 @@
 {
-  "enabledMcpjsonServers": ["analytics-mcp", "google-ads"],
+  "enabledMcpjsonServers": ["analytics-mcp", "google-ads", "gtm"],
   "hooks": {
     "SessionStart": [
       {
