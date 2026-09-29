@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "google-ads": {
+      "command": "uvx",
+      "args": ["--from", "google-ads-mcp==0.0.4", "google-ads-mcp"],
+      "env": {
+        "GOOGLE_APPLICATION_CREDENTIALS": "${GOOGLE_APPLICATION_CREDENTIALS}",
+        "GOOGLE_PROJECT_ID": "${GOOGLE_PROJECT_ID:-budget-report-377810}",
+        "GOOGLE_ADS_DEVELOPER_TOKEN": "${GOOGLE_ADS_DEVELOPER_TOKEN}",
+        "GOOGLE_ADS_LOGIN_CUSTOMER_ID": "${GOOGLE_ADS_LOGIN_CUSTOMER_ID:-}"
+      }
+    }
+  }
+}
