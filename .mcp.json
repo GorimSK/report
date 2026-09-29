@@ -14,6 +14,10 @@
         "GOOGLE_ADS_DEVELOPER_TOKEN": "${GOOGLE_ADS_DEVELOPER_TOKEN:-}",
         "GOOGLE_ADS_LOGIN_CUSTOMER_ID": "${GOOGLE_ADS_LOGIN_CUSTOMER_ID:-6816575574}"
       }
+    },
+    "gtm": {
+      "command": "bash",
+      "args": [".claude/gtm-mcp.sh"]
     }
   }
 }

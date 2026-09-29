@@ -1,5 +1,5 @@
 #!/bin/bash
-# Installs the Google Analytics MCP server (analytics-mcp) for Claude Code on the web.
+# Installs the Google Analytics (analytics-mcp) and GTM MCP servers for Claude Code on the web.
 # The service account key itself is decoded at server start by .claude/ga4-mcp.sh.
 set -euo pipefail
 
@@ -16,4 +16,12 @@ fi
 
 if [ -z "${GA4_SA_KEY_B64:-}" ]; then
   echo "GA4_SA_KEY_B64 is not set in the cloud environment; analytics-mcp will not be able to authenticate." >&2
+fi
+
+# GTM MCP server (scripts/gtm_mcp.py), started by .claude/gtm-mcp.sh.
+GTM_VENV="$HOME/.local/share/gtm-mcp-venv"
+
+if [ ! -x "$GTM_VENV/bin/python" ]; then
+  python3 -m venv "$GTM_VENV"
+  "$GTM_VENV/bin/pip" install --quiet --disable-pip-version-check "mcp>=1.0,<2" "google-auth>=2.0" requests
 fi
