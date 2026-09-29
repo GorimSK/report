@@ -17,7 +17,7 @@ on the web v nastaveniach environmentu).
 | `GOOGLE_ADS_DEVELOPER_TOKEN` | Developer token z Google Ads → Nástroje → API Center (min. Explorer access) |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Cesta k ADC JSON so scope `https://www.googleapis.com/auth/adwords` |
 | `GOOGLE_PROJECT_ID` | GCP projekt (default `groow-reporting`) |
-| `GOOGLE_ADS_LOGIN_CUSTOMER_ID` | Voliteľné – ID MCC účtu bez pomlčiek, ak pristupuješ cez manažérsky účet |
+| `GOOGLE_ADS_LOGIN_CUSTOMER_ID` | ID MCC účtu bez pomlčiek (default `6816575574`) |
 
 ## Postup
 
